@@ -46,7 +46,7 @@ use super::super::{VsockBackend, VsockChannel, VsockEpollListener, VsockError};
 use super::muxer_killq::MuxerKillQ;
 use super::muxer_rxq::MuxerRxQ;
 use super::{MuxerConnection, VsockUnixBackendError, defs};
-use crate::devices::virtio::vsock::metrics::{METRICS, VsockDeviceMetrics, VsockMetricsPerDevice};
+use crate::devices::virtio::vsock::metrics::{METRICS, VsockDeviceMetrics};
 use crate::devices::virtio::vsock::packet::{VsockPacketRx, VsockPacketTx};
 use crate::logger::IncMetric;
 
@@ -313,6 +313,13 @@ impl VsockMuxer {
             .and_then(|sock| sock.set_nonblocking(true).map(|_| sock))
             .map_err(VsockUnixBackendError::UnixBind)?;
 
+        let metrics = METRICS
+            .write()
+            .unwrap()
+            .entry(cid)
+            .or_insert_with(|| Arc::new(VsockDeviceMetrics::default()))
+            .clone();
+
         let mut muxer = Self {
             cid,
             host_sock,
@@ -324,7 +331,7 @@ impl VsockMuxer {
             killq: MuxerKillQ::new(),
             local_port_last: (1u32 << 30) - 1,
             local_port_set: HashSet::with_capacity(defs::MAX_CONNECTIONS),
-            metrics: VsockMetricsPerDevice::alloc(cid),
+            metrics: metrics,
         };
 
         // Listen on the host initiated socket, for incoming connections.

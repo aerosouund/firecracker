@@ -35,7 +35,6 @@ use super::device::{EVQ_INDEX, RXQ_INDEX, TXQ_INDEX, Vsock};
 use crate::devices::virtio::device::VirtioDevice;
 use crate::devices::virtio::queue::InvalidAvailIdx;
 use crate::devices::virtio::vsock::defs::VSOCK_NUM_QUEUES;
-use crate::devices::virtio::vsock::metrics::VsockMetricsPerDevice;
 use crate::logger::IncMetric;
 
 impl<B> Vsock<B>

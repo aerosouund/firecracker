@@ -33,57 +33,22 @@
 //! * Shared Incremental Metrics (SharedIncMetrics) - dedicated for the metrics which need a counter
 //!   (i.e the number of times an API request failed). These metrics are reset upon flush.
 
-use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 
 use crate::logger::{IncMetric, SharedIncMetric};
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock};
 
-/// This function facilitates aggregation and serialization of
-/// per device rng metrics. (Can also handle singular)
+/// This function facilitates aggregation and serialization of rng metrics.
 pub fn flush_metrics<S: Serializer>(serializer: S) -> Result<S::Ok, S::Error> {
-    let entropy_metrics = METRICS.read().unwrap();
-    let metrics_len = entropy_metrics.metrics.len();
-    // +1 to accomodate aggregate rng metrics
-    let mut seq = serializer.serialize_map(Some(1 + metrics_len))?;
-
-    let mut entropy_aggregated: EntropyDeviceMetrics = EntropyDeviceMetrics::default();
-
-    for (name, metrics) in entropy_metrics.metrics.iter() {
-        let dev_id = format!("entropy_{}", name);
-        // serialization will flush the metrics so aggregate before it.
-        let m: &EntropyDeviceMetrics = metrics;
-        entropy_aggregated.aggregate(m);
-        seq.serialize_entry(&dev_id, m)?;
-    }
-    seq.serialize_entry("entropy", &entropy_aggregated)?;
-    seq.end()
+    METRICS
+        .get()
+        .expect("metrics instance not intialized")
+        .serialize(serializer)
 }
 
-#[derive(Debug)]
-pub struct EntropyMetricsPerDevice {
-    pub metrics: BTreeMap<String, Arc<EntropyDeviceMetrics>>,
-}
-
-impl EntropyMetricsPerDevice {
-    pub fn alloc(device_id: String) -> Arc<EntropyDeviceMetrics> {
-        Arc::clone(
-            METRICS
-                .write()
-                .unwrap()
-                .metrics
-                .entry(device_id)
-                .or_insert_with(|| Arc::new(EntropyDeviceMetrics::default())),
-        )
-    }
-}
-
-static METRICS: RwLock<EntropyMetricsPerDevice> = RwLock::new(EntropyMetricsPerDevice {
-    metrics: BTreeMap::new(),
-});
-
+pub static METRICS: OnceLock<Arc<EntropyDeviceMetrics>> = OnceLock::new();
 #[derive(Debug, Serialize, Default)]
 pub struct EntropyDeviceMetrics {
     /// Number of device activation failures
@@ -134,73 +99,18 @@ impl EntropyDeviceMetrics {
 pub mod tests {
     use super::*;
     use crate::logger::IncMetric;
+    use std::sync::Arc;
 
     #[test]
     fn test_rng_dev_metrics() {
-        for i in 0..5 {
-            let dev_id: String = format!("entropy{}", i);
-            EntropyMetricsPerDevice::alloc(dev_id.clone());
-            METRICS
-                .read()
-                .unwrap()
-                .metrics
-                .get(&dev_id)
-                .unwrap()
-                .activate_fails
-                .inc();
-            METRICS
-                .read()
-                .unwrap()
-                .metrics
-                .get(&dev_id)
-                .unwrap()
-                .entropy_bytes
-                .add(10);
-            METRICS
-                .read()
-                .unwrap()
-                .metrics
-                .get(&dev_id)
-                .unwrap()
-                .host_rng_fails
-                .add(5);
-        }
+        let metrics_instance = Arc::new(EntropyDeviceMetrics::new());
+        METRICS.set(metrics_instance);
+        METRICS.get().unwrap().activate_fails.inc();
+        METRICS.get().unwrap().entropy_bytes.add(10);
+        METRICS.get().unwrap().host_rng_fails.add(5);
 
-        for i in 0..5 {
-            let dev_id: String = format!("entropy{}", i);
-            assert!(
-                METRICS
-                    .read()
-                    .unwrap()
-                    .metrics
-                    .get(&dev_id)
-                    .unwrap()
-                    .activate_fails
-                    .count()
-                    >= 1
-            );
-            assert!(
-                METRICS
-                    .read()
-                    .unwrap()
-                    .metrics
-                    .get(&dev_id)
-                    .unwrap()
-                    .entropy_bytes
-                    .count()
-                    >= 10
-            );
-            assert_eq!(
-                METRICS
-                    .read()
-                    .unwrap()
-                    .metrics
-                    .get(&dev_id)
-                    .unwrap()
-                    .host_rng_fails
-                    .count(),
-                5
-            );
-        }
+        assert!(METRICS.get().unwrap().activate_fails.count() >= 1);
+        assert!(METRICS.get().unwrap().entropy_bytes.count() >= 10);
+        assert_eq!(METRICS.get().unwrap().host_rng_fails.count(), 5);
     }
 }

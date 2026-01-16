@@ -3,6 +3,7 @@
 
 use std::io;
 use std::ops::Deref;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use aws_lc_rs::rand;
@@ -10,7 +11,7 @@ use log::info;
 use vm_memory::GuestMemoryError;
 use vmm_sys_util::eventfd::EventFd;
 
-use super::metrics::EntropyMetricsPerDevice;
+use super::metrics::METRICS;
 use super::{RNG_NUM_QUEUES, RNG_QUEUE};
 use crate::devices::DeviceError;
 use crate::devices::virtio::ActivateError;
@@ -44,8 +45,6 @@ pub enum EntropyError {
 
 #[derive(Debug)]
 pub struct Entropy {
-    // The device identifier in the metrics map
-    dev_id: String,
     // VirtIO fields
     avail_features: u64,
     acked_features: u64,
@@ -77,11 +76,10 @@ impl Entropy {
         let queue_events = (0..RNG_NUM_QUEUES)
             .map(|_| EventFd::new(libc::EFD_NONBLOCK))
             .collect::<Result<Vec<EventFd>, io::Error>>()?;
-        // generate a random ID for the device to identify it in the metrics map
-        let dev_id = Uuid::new_v4().to_string();
+        let metrics = Arc::new(EntropyDeviceMetrics::default());
+        METRICS.get_or_init(|| metrics.clone());
 
         Ok(Self {
-            dev_id: dev_id.clone(),
             avail_features: 1 << VIRTIO_F_VERSION_1,
             acked_features: 0u64,
             activate_event,
@@ -90,7 +88,7 @@ impl Entropy {
             queue_events,
             rate_limiter,
             buffer: IoVecBufferMut::new()?,
-            metrics: EntropyMetricsPerDevice::alloc(dev_id),
+            metrics: metrics,
         })
     }
 
@@ -534,7 +532,6 @@ mod tests {
 
     #[test]
     fn test_bad_rate_limiter_event() {
-        let global = EntropyMetricsPerDevice::alloc("global".to_string());
         let mem = create_virtio_mem();
         let mut th = VirtioTestHelper::<Entropy>::new(&mem, default_entropy());
 
@@ -550,7 +547,6 @@ mod tests {
 
     #[test]
     fn test_bandwidth_rate_limiter() {
-        let global = EntropyMetricsPerDevice::alloc("global".to_string());
         let mem = create_virtio_mem();
         // Rate Limiter with 4000 bytes / sec allowance and no initial burst allowance
         let device = Entropy::new(RateLimiter::new(4000, 0, 1000, 0, 0, 0).unwrap()).unwrap();

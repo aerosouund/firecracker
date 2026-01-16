@@ -38,7 +38,7 @@ use crate::devices::virtio::generated::virtio_ids::VIRTIO_ID_VSOCK;
 use crate::devices::virtio::queue::{InvalidAvailIdx, Queue as VirtQueue};
 use crate::devices::virtio::transport::{VirtioInterrupt, VirtioInterruptType};
 use crate::devices::virtio::vsock::VsockError;
-use crate::devices::virtio::vsock::metrics::{METRICS, VsockDeviceMetrics, VsockMetricsPerDevice};
+use crate::devices::virtio::vsock::metrics::{METRICS, VsockDeviceMetrics};
 use crate::impl_device_type;
 use crate::logger::IncMetric;
 use crate::utils::byte_order;
@@ -99,6 +99,9 @@ where
         for _ in 0..queues.len() {
             queue_events.push(EventFd::new(libc::EFD_NONBLOCK).map_err(VsockError::EventFd)?);
         }
+        // the device creates its own metrics instance and adds an arc of it to the global metrics map
+        let metrics = Arc::new(VsockDeviceMetrics::default());
+        METRICS.write().unwrap().insert(cid, metrics.clone());
 
         Ok(Vsock {
             cid,
@@ -111,7 +114,7 @@ where
             device_state: DeviceState::Inactive,
             rx_packet: VsockPacketRx::new()?,
             tx_packet: VsockPacketTx::default(),
-            metrics: VsockMetricsPerDevice::alloc(cid),
+            metrics: metrics,
         })
     }
 

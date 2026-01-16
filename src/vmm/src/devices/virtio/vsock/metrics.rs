@@ -48,13 +48,13 @@ use std::sync::{Arc, RwLock};
 /// per device vsock metrics. (Can also handle singular)
 pub fn flush_metrics<S: Serializer>(serializer: S) -> Result<S::Ok, S::Error> {
     let vsock_metrics = METRICS.read().unwrap();
-    let metrics_len = vsock_metrics.metrics.len();
+    let metrics_len = vsock_metrics.len();
     // +1 to accomodate aggregate vsock metrics
     let mut seq = serializer.serialize_map(Some(1 + metrics_len))?;
 
     let mut vsock_aggregated: VsockDeviceMetrics = VsockDeviceMetrics::default();
 
-    for (cid, metrics) in vsock_metrics.metrics.iter() {
+    for (cid, metrics) in vsock_metrics.iter() {
         // serialization will flush the metrics so aggregate before it.
         let m: &VsockDeviceMetrics = metrics;
         vsock_aggregated.aggregate(m);
@@ -64,27 +64,7 @@ pub fn flush_metrics<S: Serializer>(serializer: S) -> Result<S::Ok, S::Error> {
     seq.end()
 }
 
-#[derive(Debug)]
-pub struct VsockMetricsPerDevice {
-    pub metrics: BTreeMap<u64, Arc<VsockDeviceMetrics>>,
-}
-
-impl VsockMetricsPerDevice {
-    pub fn alloc(cid: u64) -> Arc<VsockDeviceMetrics> {
-        Arc::clone(
-            METRICS
-                .write()
-                .unwrap()
-                .metrics
-                .entry(cid)
-                .or_insert_with(|| Arc::new(VsockDeviceMetrics::default())),
-        )
-    }
-}
-
-pub static METRICS: RwLock<VsockMetricsPerDevice> = RwLock::new(VsockMetricsPerDevice {
-    metrics: BTreeMap::new(),
-});
+pub static METRICS: RwLock<BTreeMap<u64, Arc<VsockDeviceMetrics>>> = RwLock::new(BTreeMap::new());
 
 /// Vsock-related metrics.
 #[derive(Debug, Serialize, Default)]
@@ -208,15 +188,15 @@ pub mod tests {
         drop(METRICS.read().unwrap());
         drop(METRICS.write().unwrap());
 
-        // Allocate metrics for the device.
-        VsockMetricsPerDevice::alloc(guest_cid);
-        assert!(METRICS.read().unwrap().metrics.contains_key(&guest_cid));
+        METRICS
+            .write()
+            .unwrap()
+            .insert(guest_cid, Arc::new(VsockDeviceMetrics::default()));
 
         // Increment a field (e.g. activate_fails) to ensure it's being tracked.
         METRICS
             .read()
             .unwrap()
-            .metrics
             .get(&guest_cid)
             .unwrap()
             .activate_fails
@@ -225,7 +205,6 @@ pub mod tests {
         let count = METRICS
             .read()
             .unwrap()
-            .metrics
             .get(&guest_cid)
             .unwrap()
             .activate_fails
@@ -247,7 +226,6 @@ pub mod tests {
         METRICS
             .read()
             .unwrap()
-            .metrics
             .get(&guest_cid)
             .unwrap()
             .activate_fails
@@ -256,7 +234,6 @@ pub mod tests {
         METRICS
             .read()
             .unwrap()
-            .metrics
             .get(&guest_cid)
             .unwrap()
             .rx_bytes_count
@@ -265,7 +242,6 @@ pub mod tests {
         let rx_count = METRICS
             .read()
             .unwrap()
-            .metrics
             .get(&guest_cid)
             .unwrap()
             .rx_bytes_count

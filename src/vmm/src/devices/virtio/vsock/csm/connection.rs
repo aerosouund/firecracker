@@ -92,7 +92,7 @@ use super::super::defs::uapi;
 use super::super::{VsockChannel, VsockEpollListener, VsockError};
 use super::txbuf::TxBuf;
 use super::{ConnState, PendingRx, PendingRxSet, VsockCsmError, defs};
-use crate::devices::virtio::vsock::metrics::{VsockDeviceMetrics, VsockMetricsPerDevice};
+use crate::devices::virtio::vsock::metrics::{METRICS, VsockDeviceMetrics};
 use crate::devices::virtio::vsock::packet::{VsockPacketHeader, VsockPacketRx, VsockPacketTx};
 use crate::logger::IncMetric;
 use crate::utils::wrap_usize_to_u32;
@@ -514,6 +514,13 @@ where
         peer_port: u32,
         peer_buf_alloc: u32,
     ) -> Self {
+        let metrics = METRICS
+            .write()
+            .unwrap()
+            .entry(peer_cid)
+            .or_insert_with(|| Arc::new(VsockDeviceMetrics::default()))
+            .clone();
+
         Self {
             local_cid,
             peer_cid,
@@ -529,7 +536,7 @@ where
             last_fwd_cnt_to_peer: Wrapping(0),
             pending_rx: PendingRxSet::from(PendingRx::Response),
             expiry: None,
-            metrics: VsockMetricsPerDevice::alloc(peer_cid),
+            metrics: metrics,
         }
     }
 
@@ -541,6 +548,13 @@ where
         local_port: u32,
         peer_port: u32,
     ) -> Self {
+        let metrics = METRICS
+            .write()
+            .unwrap()
+            .entry(peer_cid)
+            .or_insert_with(|| Arc::new(VsockDeviceMetrics::default()))
+            .clone();
+
         Self {
             local_cid,
             peer_cid,
@@ -556,7 +570,7 @@ where
             last_fwd_cnt_to_peer: Wrapping(0),
             pending_rx: PendingRxSet::from(PendingRx::Request),
             expiry: None,
-            metrics: VsockMetricsPerDevice::alloc(peer_cid),
+            metrics: metrics,
         }
     }
 
