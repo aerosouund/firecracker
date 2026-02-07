@@ -81,7 +81,7 @@ def test_vsock(vsock_uvm_any, bin_vsock_path, test_fc_session_root_path):
     validate_fc_metrics(metrics)
 
 
-def negative_test_host_connections(vm, blob_path, blob_hash):
+def negative_test_host_connections(vm, blob_path, blob_hash, vsock_type):
     """Negative test for host-initiated connections.
 
     This will start a daemonized echo server on the guest VM, and then spawn
@@ -93,7 +93,7 @@ def negative_test_host_connections(vm, blob_path, blob_hash):
 
     workers = []
     for _ in range(NEGATIVE_TEST_CONNECTION_COUNT):
-        worker = HostEchoWorker(uds_path, blob_path)
+        worker = HostEchoWorker(uds_path, blob_path, vsock_type)
         workers.append(worker)
         worker.start()
 
@@ -131,6 +131,7 @@ def test_vsock_epipe(vsock_uvm_any, bin_vsock_path, test_fc_session_root_path):
     Vsock negative test to validate SIGPIPE/EPIPE handling.
     """
     vm = vsock_uvm_any
+    vm.start()
 
     # Generate the random data blob file, 20MB
     blob_path, blob_hash = make_blob(test_fc_session_root_path, 20 * 2**20)
@@ -142,7 +143,7 @@ def test_vsock_epipe(vsock_uvm_any, bin_vsock_path, test_fc_session_root_path):
 
     # Negative test for host-initiated connections that
     # are closed with in flight data.
-    negative_test_host_connections(vm, blob_path, blob_hash)
+    negative_test_host_connections(vm, blob_path, blob_hash, SOCK_STREAM)
     metrics = vm.flush_metrics()
     validate_fc_metrics(metrics)
 
@@ -207,6 +208,7 @@ def test_vsock_transport_reset_h2g(
             assert (
                 response == b""
             ), f"Connection not closed: response received '{response.decode('utf-8')}'"
+
         except (SocketTimeout, ConnectionResetError, BrokenPipeError):
             pass
 
