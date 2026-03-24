@@ -122,6 +122,8 @@ pub struct VsockMuxer {
     pub(crate) local_port_last: u32,
     /// The type of the socket (stream or seqpacket)
     pub(crate) vsock_type: VsockType,
+    /// Length of the intermediate connection buffer
+    pub(crate) conn_buffer_size: Option<usize>,
 }
 
 // SAFETY: VsockMuxer is Send because it manages its own internal state and synchronization,
@@ -330,6 +332,7 @@ impl VsockMuxer {
         cid: u64,
         host_sock_path: String,
         vsock_type: VsockType,
+        conn_buffer_size: Option<usize>,
     ) -> Result<Self, VsockUnixBackendError> {
         // Open/bind on the host Unix socket, so we can accept host-initiated
         // connections.
@@ -360,6 +363,7 @@ impl VsockMuxer {
             local_port_last: (1u32 << 30) - 1,
             local_port_set: HashSet::with_capacity(defs::MAX_CONNECTIONS),
             vsock_type,
+            conn_buffer_size,
         };
 
         // Listen on the host initiated socket, for incoming connections.
@@ -443,7 +447,7 @@ impl VsockMuxer {
                                     local_port,
                                     peer_port,
                                     self.vsock_type.clone(),
-                                    None,
+                                    self.conn_buffer_size,
                                 ),
                             )
                         })
@@ -696,7 +700,7 @@ impl VsockMuxer {
                                 pkt.hdr.src_port(),
                                 pkt.hdr.buf_alloc(),
                                 VsockType::Seqpacket,
-                                None,
+                                self.conn_buffer_size,
                             ),
                         )
                     })
@@ -919,7 +923,7 @@ mod tests {
                 )
                 .unwrap();
 
-            let muxer = VsockMuxer::new(PEER_CID, get_file(name), VsockType::Stream).unwrap();
+            let muxer = VsockMuxer::new(PEER_CID, get_file(name), VsockType::Stream, None).unwrap();
             Self {
                 _vsock_test_ctx: vsock_test_ctx,
                 rx_pkt,
