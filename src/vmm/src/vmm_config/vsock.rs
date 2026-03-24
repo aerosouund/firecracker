@@ -4,9 +4,11 @@
 use std::convert::TryFrom;
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::devices::virtio::vsock::{Vsock, VsockError, VsockUnixBackend, VsockUnixBackendError};
+
+const MAX_CONN_BUF: usize = 256 * 1024;
 
 type MutexVsockUnix = Arc<Mutex<Vsock<VsockUnixBackend>>>;
 
@@ -30,6 +32,24 @@ pub enum VsockType {
     Seqpacket,
 }
 
+fn deserialize_conn_buffer_size<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Option::<usize>::deserialize(deserializer)?;
+
+    if let Some(n) = v {
+        if n > MAX_CONN_BUF {
+            return Err(serde::de::Error::custom(format!(
+                "conn_buffer_size too large (max {})",
+                MAX_CONN_BUF
+            )));
+        }
+    }
+
+    Ok(v)
+}
+
 /// This struct represents the strongly typed equivalent of the json body
 /// from vsock related requests.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -46,6 +66,7 @@ pub struct VsockDeviceConfig {
     /// the type of the underlying socket
     pub vsock_type: VsockType,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_conn_buffer_size")]
     /// the size of the intermediate connection buffer
     pub conn_buffer_size: Option<usize>,
 }
