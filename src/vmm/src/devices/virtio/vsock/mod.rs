@@ -132,6 +132,8 @@ pub enum VsockError {
     IovDeque(IovDequeError),
     /// Tried to push to full IovDeque.
     IovDequeOverflow,
+    /// Message too big for the intermediate connection buffer. buffer length {0}, incoming size {1}
+    MessageTooLong(u32, u32)
 }
 
 impl From<IoVecError> for VsockError {
