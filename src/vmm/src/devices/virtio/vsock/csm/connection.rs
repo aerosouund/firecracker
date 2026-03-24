@@ -245,7 +245,11 @@ impl<S: VsockConnectionBackend + Debug> VsockConnection<S> {
             return Err(VsockError::PktBufMissing);
         };
 
-        let b = pkt.read_at_offset_from(&mut connection_buffer.as_slice(), 0, max_len)?;
+        let b = pkt.read_at_offset_from(
+            &mut connection_buffer.as_slice(),
+            0,
+            max_len.min(self.conn_buffer_wrote_bytes),
+        )?;
         connection_buffer.drain(..b as usize);
         self.conn_buffer_wrote_bytes = self.conn_buffer_wrote_bytes.saturating_sub(b);
 
@@ -1445,6 +1449,270 @@ mod tests {
             ctx.notify_epollout();
             assert_eq!(ctx.conn.state, ConnState::Killed);
         }
+    }
+
+    // A real AF_UNIX SOCK_SEQPACKET socket pair used for seqpacket tests.
+    // The local fd is the connection's read end; the remote fd is the test's write end.
+    #[derive(Debug)]
+    struct SeqpacketTestStream {
+        local_fd: RawFd,
+        remote_fd: RawFd,
+    }
+
+    impl SeqpacketTestStream {
+        fn new() -> Self {
+            let mut fds = [0i32; 2];
+            let ret = unsafe {
+                libc::socketpair(
+                    libc::AF_UNIX,
+                    libc::SOCK_SEQPACKET | libc::SOCK_NONBLOCK,
+                    0,
+                    fds.as_mut_ptr(),
+                )
+            };
+            assert_eq!(ret, 0, "socketpair failed: {}", IoError::last_os_error());
+            Self {
+                local_fd: fds[0],
+                remote_fd: fds[1],
+            }
+        }
+
+        // Write one seqpacket message into the remote end.
+        fn push_message(&self, data: &[u8]) {
+            let ret = unsafe {
+                libc::write(
+                    self.remote_fd,
+                    data.as_ptr() as *const libc::c_void,
+                    data.len(),
+                )
+            };
+            assert_eq!(ret as usize, data.len(), "push_message write failed");
+        }
+    }
+
+    impl Drop for SeqpacketTestStream {
+        fn drop(&mut self) {
+            unsafe {
+                libc::close(self.local_fd);
+                libc::close(self.remote_fd);
+            }
+        }
+    }
+
+    impl AsRawFd for SeqpacketTestStream {
+        fn as_raw_fd(&self) -> RawFd {
+            self.local_fd
+        }
+    }
+
+    impl ReadVolatile for SeqpacketTestStream {
+        fn read_volatile<B: BitmapSlice>(
+            &mut self,
+            buf: &mut VolatileSlice<B>,
+        ) -> Result<usize, VolatileMemoryError> {
+            let mut tmp = vec![0u8; buf.len()];
+            let ret = unsafe {
+                libc::recv(
+                    self.local_fd,
+                    tmp.as_mut_ptr() as *mut libc::c_void,
+                    tmp.len(),
+                    0,
+                )
+            };
+            if ret < 0 {
+                return Err(VolatileMemoryError::IOError(IoError::last_os_error()));
+            }
+            let n = ret as usize;
+            buf.copy_from(&tmp[..n]);
+            Ok(n)
+        }
+    }
+
+    impl Write for SeqpacketTestStream {
+        fn write(&mut self, data: &[u8]) -> Result<usize, IoError> {
+            let ret = unsafe {
+                libc::write(
+                    self.local_fd,
+                    data.as_ptr() as *const libc::c_void,
+                    data.len(),
+                )
+            };
+            if ret < 0 {
+                Err(IoError::last_os_error())
+            } else {
+                Ok(ret as usize)
+            }
+        }
+
+        fn flush(&mut self) -> Result<(), IoError> {
+            Ok(())
+        }
+    }
+
+    impl WriteVolatile for SeqpacketTestStream {
+        fn write_volatile<B: BitmapSlice>(
+            &mut self,
+            buf: &VolatileSlice<B>,
+        ) -> Result<usize, VolatileMemoryError> {
+            let mut tmp = vec![0u8; buf.len()];
+            buf.copy_to(&mut tmp);
+            let ret = unsafe {
+                libc::write(
+                    self.local_fd,
+                    tmp.as_ptr() as *const libc::c_void,
+                    tmp.len(),
+                )
+            };
+            if ret < 0 {
+                Err(VolatileMemoryError::IOError(IoError::last_os_error()))
+            } else {
+                Ok(ret as usize)
+            }
+        }
+    }
+
+    impl VsockConnectionBackend for SeqpacketTestStream {}
+
+    // EOM bit as defined in packet.rs
+    const VIRTIO_VSOCK_SEQ_EOM: u32 = 1 << 0;
+
+    // Creates an established seqpacket connection backed by `stream`.
+    // `conn_buffer_size` sets the intermediate buffer used for large messages.
+    // Returns (connection, rx_pkt); the caller must keep _ctx alive for the duration.
+    fn make_established_seqpacket(
+        stream: SeqpacketTestStream,
+        conn_buffer_size: Option<usize>,
+    ) -> (
+        VsockConnection<SeqpacketTestStream>,
+        VsockPacketRx,
+        TestContext,
+    ) {
+        let vsock_test_ctx = TestContext::new();
+        let mut handler_ctx = vsock_test_ctx.create_event_handler_context();
+        let mut rx_pkt = VsockPacketRx::new().unwrap();
+        rx_pkt
+            .parse(
+                &vsock_test_ctx.mem,
+                handler_ctx.device.queues[RXQ_INDEX].pop().unwrap().unwrap(),
+            )
+            .unwrap();
+
+        let mut conn = VsockConnection::<SeqpacketTestStream>::new_peer_init(
+            stream,
+            LOCAL_CID,
+            PEER_CID,
+            LOCAL_PORT,
+            PEER_PORT,
+            PEER_BUF_ALLOC,
+            VsockType::Seqpacket,
+            conn_buffer_size,
+        );
+        // Drain the initial RESPONSE to reach Established state.
+        assert!(conn.has_pending_rx());
+        conn.recv_pkt(&mut rx_pkt).unwrap();
+        assert_eq!(rx_pkt.hdr.op(), uapi::VSOCK_OP_RESPONSE);
+        assert_eq!(conn.state, ConnState::Established);
+
+        (conn, rx_pkt, vsock_test_ctx)
+    }
+
+    // Seqpacket: a small message (fits in one RX descriptor) is delivered in a single recv_pkt
+    // call with EOM set and should_retrigger=false.
+    #[test]
+    fn test_seqpacket_recv_small_message() {
+        let stream = SeqpacketTestStream::new();
+        stream.push_message(b"hello");
+        let (mut conn, mut rx_pkt, _ctx) = make_established_seqpacket(stream, None);
+
+        conn.notify(EventSet::IN);
+        assert!(conn.has_pending_rx());
+
+        let res = conn.recv_pkt(&mut rx_pkt).unwrap();
+
+        assert_eq!(rx_pkt.hdr.op(), uapi::VSOCK_OP_RW);
+        assert_eq!(rx_pkt.hdr.len(), 5);
+        assert_eq!(res.bytes_read, 5);
+        assert!(!res.should_retrigger);
+        // EOM flag must be set: this is the end of the seqpacket message.
+        assert_ne!(rx_pkt.hdr.flags() & VIRTIO_VSOCK_SEQ_EOM, 0);
+        // No further pending RX after a complete small message.
+        assert!(!conn.has_pending_rx());
+    }
+
+    // Seqpacket: a message larger than the RX descriptor buffer (4096 bytes) is split across
+    // two recv_pkt calls. The first call sets should_retrigger=true and leaves EOM clear;
+    // the second call delivers the remainder with EOM set.
+    #[test]
+    fn test_seqpacket_recv_large_message() {
+        const BUF_SIZE: usize = 4096; // matches the test descriptor size
+        const MSG_LEN: usize = BUF_SIZE + 512;
+
+        let stream = SeqpacketTestStream::new();
+        stream.push_message(&vec![0xABu8; MSG_LEN]);
+        let (mut conn, mut rx_pkt, _ctx) = make_established_seqpacket(stream, None);
+
+        conn.notify(EventSet::IN);
+        assert!(conn.has_pending_rx());
+
+        // First call: fills the descriptor (4096 bytes), does not set EOM.
+        let res1 = conn.recv_pkt(&mut rx_pkt).unwrap();
+        assert_eq!(rx_pkt.hdr.op(), uapi::VSOCK_OP_RW);
+        assert_eq!(res1.bytes_read, BUF_SIZE as u32);
+        assert!(res1.should_retrigger);
+        assert_eq!(rx_pkt.hdr.flags() & VIRTIO_VSOCK_SEQ_EOM, 0);
+        // Connection must still have pending RX for the remainder.
+        assert!(conn.has_pending_rx());
+
+        // Second call: delivers the remaining 512 bytes with EOM set.
+        let res2 = conn.recv_pkt(&mut rx_pkt).unwrap();
+        assert_eq!(rx_pkt.hdr.op(), uapi::VSOCK_OP_RW);
+        assert_eq!(res2.bytes_read, 512);
+        assert!(!res2.should_retrigger);
+        assert_ne!(rx_pkt.hdr.flags() & VIRTIO_VSOCK_SEQ_EOM, 0);
+        assert!(!conn.has_pending_rx());
+    }
+
+    // Seqpacket: a message that exactly fills the RX descriptor is handled in one call,
+    // as a "small" packet (not buffered), with EOM set.
+    #[test]
+    fn test_seqpacket_recv_exact_buf_size_message() {
+        const BUF_SIZE: usize = 4096;
+
+        let stream = SeqpacketTestStream::new();
+        stream.push_message(&vec![0x42u8; BUF_SIZE]);
+        let (mut conn, mut rx_pkt, _ctx) = make_established_seqpacket(stream, None);
+
+        conn.notify(EventSet::IN);
+
+        let res = conn.recv_pkt(&mut rx_pkt).unwrap();
+
+        assert_eq!(rx_pkt.hdr.op(), uapi::VSOCK_OP_RW);
+        assert_eq!(res.bytes_read, BUF_SIZE as u32);
+        assert!(!res.should_retrigger);
+        assert_ne!(rx_pkt.hdr.flags() & VIRTIO_VSOCK_SEQ_EOM, 0);
+        assert!(!conn.has_pending_rx());
+    }
+
+    // Seqpacket: a message too large to fit in the intermediate connection buffer returns
+    // a MessageTooLong error and kills the connection (RST).
+    #[test]
+    fn test_seqpacket_recv_message_too_long() {
+        // Use a tiny intermediate buffer so a message slightly larger than the RX descriptor
+        // (4097 bytes > 4096 buf_size) exceeds it.
+        const SMALL_BUF: usize = 128;
+        const MSG_LEN: usize = 4097; // > buf_size (4096) so large-packet path is taken
+
+        let stream = SeqpacketTestStream::new();
+        stream.push_message(&vec![0u8; MSG_LEN]);
+        let (mut conn, mut rx_pkt, _ctx) =
+            make_established_seqpacket(stream, Some(SMALL_BUF));
+
+        conn.notify(EventSet::IN);
+
+        // recv_pkt should not propagate the error; instead it emits an RST packet.
+        let res = conn.recv_pkt(&mut rx_pkt).unwrap();
+        assert_eq!(rx_pkt.hdr.op(), uapi::VSOCK_OP_RST);
+        assert_eq!(res.bytes_read, 0);
     }
 
     #[test]
