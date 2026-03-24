@@ -45,6 +45,8 @@ pub struct VsockDeviceConfig {
     pub uds_path: String,
     /// the type of the underlying socket
     pub vsock_type: VsockType,
+    /// the size of the intermediate connection buffer
+    pub conn_buffer_size: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -52,6 +54,7 @@ struct VsockAndUnixPath {
     vsock: MutexVsockUnix,
     uds_path: String,
     vsock_type: VsockType,
+    conn_buffer_size: Option<usize>,
 }
 
 impl From<&VsockAndUnixPath> for VsockDeviceConfig {
@@ -62,6 +65,7 @@ impl From<&VsockAndUnixPath> for VsockDeviceConfig {
             guest_cid: u32::try_from(vsock_lock.cid()).unwrap(),
             uds_path: vsock.uds_path.clone(),
             vsock_type: vsock.vsock_type.clone(),
+            conn_buffer_size: vsock.conn_buffer_size,
         }
     }
 }
@@ -73,6 +77,7 @@ impl From<&Vsock<VsockUnixBackend>> for VsockDeviceConfig {
             guest_cid: u32::try_from(vsock.cid()).unwrap(),
             uds_path: vsock.backend().host_sock_path().to_owned(),
             vsock_type: VsockType::Stream,
+            conn_buffer_size: vsock.backend().conn_buffer_size,
         }
     }
 }
@@ -96,6 +101,7 @@ impl VsockBuilder {
             uds_path: device_inner.backend().host_sock_path().to_owned(),
             vsock: device.clone(),
             vsock_type: device_inner.backend().vsock_type().clone(),
+            conn_buffer_size: device_inner.backend().conn_buffer_size,
         });
     }
 
@@ -110,6 +116,7 @@ impl VsockBuilder {
             uds_path: cfg.uds_path.clone(),
             vsock: Arc::new(Mutex::new(Self::create_unixsock_vsock(cfg)?)),
             vsock_type: cfg.vsock_type.clone(),
+            conn_buffer_size: cfg.conn_buffer_size,
         });
         Ok(())
     }
@@ -127,7 +134,7 @@ impl VsockBuilder {
             u64::from(cfg.guest_cid),
             cfg.uds_path.clone(),
             cfg.vsock_type.clone(),
-            None,
+            cfg.conn_buffer_size,
         )?;
 
         Vsock::new(u64::from(cfg.guest_cid), backend).map_err(VsockConfigError::CreateVsockDevice)
@@ -153,6 +160,7 @@ pub(crate) mod tests {
             guest_cid: 3,
             uds_path: tmp_sock_file.as_path().to_str().unwrap().to_string(),
             vsock_type: VsockType::default(),
+            conn_buffer_size: None,
         }
     }
 
@@ -206,6 +214,7 @@ pub(crate) mod tests {
                 1,
                 tmp_sock_file.as_path().to_str().unwrap().to_string(),
                 VsockType::default(),
+                None,
             )
             .unwrap(),
         )
