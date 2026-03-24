@@ -112,4 +112,44 @@ impl Write for ConnBackend {
     }
 }
 
+pub trait IncomingLength {
+    fn incoming_len(&mut self) -> Result<usize, io::Error>;
+}
+
+impl<W: AsRawFd> IncomingLength for W {
+    fn incoming_len(&mut self) -> Result<usize, io::Error> {
+        let fd = self.as_raw_fd();
+        // the maximum message size 256 bytes anyways
+        let mut peek_buf = [0u8; 1];
+        let msg_size = unsafe {
+            libc::recv(
+                fd,
+                peek_buf.as_mut_ptr().cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_TRUNC,
+            )
+        };
+        if msg_size < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(msg_size as usize)
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct ReadResult {
+    pub bytes_read: u32,
+    pub should_retrigger: bool,
+}
+
+impl ReadResult {
+    pub fn new(bytes_read: u32, should_retrigger: bool) -> Self {
+        ReadResult {
+            bytes_read,
+            should_retrigger,
+        }
+    }
+}
+
 impl VsockConnectionBackend for ConnBackend {}
