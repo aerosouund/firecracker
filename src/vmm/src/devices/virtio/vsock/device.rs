@@ -180,7 +180,7 @@ where
                         should_retrigger = read_res.should_retrigger;
                         self.rx_packet
                             .commit_hdr()
-                            .map(|_| VSOCK_PKT_HDR_SIZE + read_res.bytes_read as u32)
+                            .map(|_| VSOCK_PKT_HDR_SIZE + read_res.bytes_read)
                             .unwrap_or_else(|err| {
                                 warn!("vsock: Error writing packet header: {:?}. Discarding.", err);
                                 0

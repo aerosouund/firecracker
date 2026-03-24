@@ -121,6 +121,9 @@ impl<W: AsRawFd> IncomingLength for W {
         let fd = self.as_raw_fd();
         // the maximum message size 256 bytes anyways
         let mut peek_buf = [0u8; 1];
+        // SAFETY: `fd` is a valid file descriptor for the duration of this call, and `peek_buf`
+        // is a valid single-byte buffer. MSG_PEEK | MSG_TRUNC returns the message size without
+        // consuming it.
         let msg_size = unsafe {
             libc::recv(
                 fd,
@@ -132,7 +135,7 @@ impl<W: AsRawFd> IncomingLength for W {
         if msg_size < 0 {
             Err(io::Error::last_os_error())
         } else {
-            Ok(msg_size as usize)
+            Ok(msg_size.cast_unsigned())
         }
     }
 }

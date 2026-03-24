@@ -169,11 +169,15 @@ impl<S: VsockConnectionBackend + Debug> VsockConnection<S> {
             VsockType::Seqpacket => {
                 if self.conn_buffer_wrote_bytes == 0 {
                     let incoming_msg_size = self.stream.incoming_len().map_err(|e| {
-                        VsockError::VsockUdsBackend(VsockUnixBackendError::UnixRead((e)))
+                        VsockError::VsockUdsBackend(VsockUnixBackendError::UnixRead(e))
                     })?;
 
                     if incoming_msg_size > pkt.buf_size() as usize {
-                        self.handle_new_packet_large(pkt, max_len, incoming_msg_size as u32)
+                        self.handle_new_packet_large(
+                            pkt,
+                            max_len,
+                            u32::try_from(incoming_msg_size).unwrap_or(u32::MAX),
+                        )
                     } else {
                         self.handle_new_packet_small(pkt, max_len)
                     }
@@ -194,13 +198,15 @@ impl<S: VsockConnectionBackend + Debug> VsockConnection<S> {
             return Err(VsockError::PktBufMissing);
         };
 
-        if incoming_msg_len > connection_buffer.len() as u32 {
+        if incoming_msg_len as usize > connection_buffer.len() {
             return Err(VsockError::MessageTooLong(
-                connection_buffer.len() as u32,
+                u32::try_from(connection_buffer.len()).unwrap_or(u32::MAX),
                 incoming_msg_len,
             ));
         }
 
+        // SAFETY: `connection_buffer` is a valid Vec<u8> and we hold a mutable reference to it,
+        // guaranteeing exclusive access for the duration of this call.
         let mut recv_buf =
             unsafe { VolatileSlice::new(connection_buffer.as_mut_ptr(), connection_buffer.len()) };
         let bytes_read = self.stream.read_volatile(&mut recv_buf).map_err(|e| {
@@ -227,7 +233,7 @@ impl<S: VsockConnectionBackend + Debug> VsockConnection<S> {
         let b = pkt.read_at_offset_from(&mut self.stream, 0, max_len)?;
         // packet is small enough to fit into a single descriptor, set EOM directly.
         pkt.hdr.set_msg_eom();
-        return Ok(ReadResult::new(b, false));
+        Ok(ReadResult::new(b, false))
     }
 
     fn handle_connection_buffer_has_data(
@@ -623,6 +629,7 @@ where
     S: VsockConnectionBackend + Debug,
 {
     /// Create a new guest-initiated connection object.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_peer_init(
         stream: S,
         local_cid: u64,
