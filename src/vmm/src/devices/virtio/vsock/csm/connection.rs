@@ -173,7 +173,7 @@ impl<S: VsockConnectionBackend + Debug> VsockConnection<S> {
                     })?;
 
                     if incoming_msg_size > pkt.buf_size() as usize {
-                        self.handle_new_packet_large(pkt, max_len)
+                        self.handle_new_packet_large(pkt, max_len, incoming_msg_size as u32)
                     } else {
                         self.handle_new_packet_small(pkt, max_len)
                     }
@@ -188,10 +188,18 @@ impl<S: VsockConnectionBackend + Debug> VsockConnection<S> {
         &mut self,
         pkt: &mut VsockPacketRx,
         max_len: u32,
+        incoming_msg_len: u32,
     ) -> Result<ReadResult, VsockError> {
         let Some(mut connection_buffer) = self.connection_buffer.as_mut() else {
             return Err(VsockError::PktBufMissing);
         };
+
+        if incoming_msg_len > connection_buffer.len() as u32 {
+            return Err(VsockError::MessageTooLong(
+                connection_buffer.len() as u32,
+                incoming_msg_len,
+            ));
+        }
 
         let mut recv_buf =
             unsafe { VolatileSlice::new(connection_buffer.as_mut_ptr(), connection_buffer.len()) };
