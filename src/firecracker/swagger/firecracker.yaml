@@ -1786,6 +1786,10 @@ definitions:
           - stream
           - seqpacket
         default: stream
+      conn_buffer_size:
+        type: integer
+        description:
+          The amount in bytes that can be buffered in firecracker during sends.
       vsock_id:
         type: string
         description:
