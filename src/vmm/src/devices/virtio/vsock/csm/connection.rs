@@ -77,22 +77,24 @@ use std::fmt::Debug;
 //          2. The receiver can be proactive, and send VSOCK_OP_CREDIT_UPDATE packet, whenever
 //             it thinks its peer's information is out of date.
 //          Our implementation uses the proactive approach.
-use std::io::{ErrorKind, Write};
+use std::io::{Error, ErrorKind, Write};
 use std::num::Wrapping;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
-use vm_memory::GuestMemoryError;
 use vm_memory::io::{ReadVolatile, WriteVolatile};
+use vm_memory::{GuestMemoryError, VolatileMemory, VolatileSlice};
 use vmm_sys_util::epoll::EventSet;
 
 use super::super::defs::uapi;
 use super::super::{VsockChannel, VsockEpollListener, VsockError};
 use super::txbuf::TxBuf;
 use super::{ConnState, PendingRx, PendingRxSet, VsockCsmError, defs};
+use crate::devices::virtio::vsock::VsockUnixBackendError;
 use crate::devices::virtio::vsock::metrics::METRICS;
 use crate::devices::virtio::vsock::packet::{VsockPacketHeader, VsockPacketRx, VsockPacketTx};
+use crate::devices::virtio::vsock::unix::{IncomingLength, ReadResult};
 use crate::logger::IncMetric;
 use crate::utils::wrap_usize_to_u32;
 use crate::vmm_config::vsock::VsockType;
@@ -102,7 +104,12 @@ use crate::vmm_config::vsock::VsockType;
 /// Used as an alias for `ReadVolatile + Write + WriteVolatile + AsRawFd`
 /// (sadly, trait aliases are not supported,
 /// <https://github.com/rust-lang/rfcs/pull/1733#issuecomment-243840014>).
-pub trait VsockConnectionBackend: ReadVolatile + Write + WriteVolatile + AsRawFd {}
+pub trait VsockConnectionBackend:
+    ReadVolatile + Write + WriteVolatile + AsRawFd + IncomingLength
+{
+}
+
+const DEFAULT_CONN_BUFFER_SIZE: usize = (64 * 1024);
 
 /// A self-managing connection object, that handles communication between a guest-side AF_VSOCK
 /// socket and a host-side `ReadVolatile + Write + WriteVolatile + AsRawFd` stream.
@@ -142,6 +149,102 @@ pub struct VsockConnection<S: VsockConnectionBackend> {
     expiry: Option<Instant>,
     /// The type of the underlying socket connection
     vsock_type: VsockType,
+    /// Intermediate buffer for bytes received from the AF_UNIX
+    connection_buffer: Option<Vec<u8>>,
+    /// The amount of bytes we wrote into the intermediate connection buffer
+    conn_buffer_wrote_bytes: u32,
+}
+
+impl<S: VsockConnectionBackend + Debug> VsockConnection<S> {
+    fn recv_into(
+        &mut self,
+        pkt: &mut VsockPacketRx,
+        max_len: u32,
+    ) -> Result<ReadResult, VsockError> {
+        match self.vsock_type {
+            VsockType::Stream => {
+                let stream_bytes_read = pkt.read_at_offset_from(&mut self.stream, 0, max_len)?;
+                Ok(ReadResult::new(stream_bytes_read, false))
+            }
+            VsockType::Seqpacket => {
+                if self.conn_buffer_wrote_bytes == 0 {
+                    let incoming_msg_size = self.stream.incoming_len().map_err(|e| {
+                        VsockError::VsockUdsBackend(VsockUnixBackendError::UnixRead((e)))
+                    })?;
+
+                    if incoming_msg_size > pkt.buf_size() as usize {
+                        self.handle_new_packet_large(pkt, max_len)
+                    } else {
+                        self.handle_new_packet_small(pkt, max_len)
+                    }
+                } else {
+                    self.handle_connection_buffer_has_data(pkt, max_len)
+                }
+            }
+        }
+    }
+
+    fn handle_new_packet_large(
+        &mut self,
+        pkt: &mut VsockPacketRx,
+        max_len: u32,
+    ) -> Result<ReadResult, VsockError> {
+        let Some(mut connection_buffer) = self.connection_buffer.as_mut() else {
+            return Err(VsockError::PktBufMissing);
+        };
+
+        let mut recv_buf =
+            unsafe { VolatileSlice::new(connection_buffer.as_mut_ptr(), connection_buffer.len()) };
+        let bytes_read = self.stream.read_volatile(&mut recv_buf).map_err(|e| {
+            VsockError::VsockUdsBackend(VsockUnixBackendError::UnixRead(Error::last_os_error()))
+        })?;
+
+        // set how much we read into the intermediate buffer to conn_buffer_wrote_bytes
+        // then read from the buffer up to max_len into the packet, then subtract what
+        // we read from conn_buffer_wrote_bytes to be left with however many data we need to
+        // read in the coming iterations
+        self.conn_buffer_wrote_bytes = u32::try_from(bytes_read).unwrap_or(u32::MAX);
+        let b = pkt.read_at_offset_from(&mut connection_buffer.as_slice(), 0, max_len)?;
+        connection_buffer.drain(..b as usize);
+        self.conn_buffer_wrote_bytes = self.conn_buffer_wrote_bytes.saturating_sub(b);
+
+        Ok(ReadResult::new(b, true))
+    }
+
+    fn handle_new_packet_small(
+        &mut self,
+        pkt: &mut VsockPacketRx,
+        max_len: u32,
+    ) -> Result<ReadResult, VsockError> {
+        let b = pkt.read_at_offset_from(&mut self.stream, 0, max_len)?;
+        // packet is small enough to fit into a single descriptor, set EOM directly.
+        pkt.hdr.set_msg_eom();
+        return Ok(ReadResult::new(b, false));
+    }
+
+    fn handle_connection_buffer_has_data(
+        &mut self,
+        pkt: &mut VsockPacketRx,
+        max_len: u32,
+    ) -> Result<ReadResult, VsockError> {
+        let Some(connection_buffer) = self.connection_buffer.as_mut() else {
+            return Err(VsockError::PktBufMissing);
+        };
+
+        let b = pkt.read_at_offset_from(&mut connection_buffer.as_slice(), 0, max_len)?;
+        connection_buffer.drain(..b as usize);
+        self.conn_buffer_wrote_bytes = self.conn_buffer_wrote_bytes.saturating_sub(b);
+
+        // set MSG_EOM if we finished the buffer and mark should
+        // retrigger as false. or mark should retrigger to true to
+        // make another read happen
+        if self.conn_buffer_wrote_bytes == 0 {
+            pkt.hdr.set_msg_eom();
+            Ok(ReadResult::new(b, false))
+        } else {
+            Ok(ReadResult::new(b, true))
+        }
+    }
 }
 
 impl<S> VsockChannel for VsockConnection<S>
@@ -163,7 +266,7 @@ where
     /// - `Err(VsockError::NoData)`: there was no data available with which to fill in the packet;
     /// - `Err(VsockError::PktBufMissing)`: the packet would've been filled in with data, but it is
     ///   missing the data buffer.
-    fn recv_pkt(&mut self, pkt: &mut VsockPacketRx) -> Result<(), VsockError> {
+    fn recv_pkt(&mut self, pkt: &mut VsockPacketRx) -> Result<ReadResult, VsockError> {
         // Perform some generic initialization that is the same for any packet operation (e.g.
         // source, destination, credit, etc).
         self.init_pkt_hdr(&mut pkt.hdr);
@@ -173,7 +276,7 @@ where
         // It's dead, Jim.
         if self.pending_rx.remove(PendingRx::Rst) {
             pkt.hdr.set_op(uapi::VSOCK_OP_RST);
-            return Ok(());
+            return Ok(ReadResult::default());
         }
 
         // Next up: if we're due a connection confirmation, that's all we need to know to fill
@@ -181,7 +284,7 @@ where
         if self.pending_rx.remove(PendingRx::Response) {
             self.state = ConnState::Established;
             pkt.hdr.set_op(uapi::VSOCK_OP_RESPONSE);
-            return Ok(());
+            return Ok(ReadResult::default());
         }
 
         // Same thing goes for locally-initiated connections that need to yield a connection
@@ -190,7 +293,7 @@ where
             self.expiry =
                 Some(Instant::now() + Duration::from_millis(defs::CONN_REQUEST_TIMEOUT_MS));
             pkt.hdr.set_op(uapi::VSOCK_OP_REQUEST);
-            return Ok(());
+            return Ok(ReadResult::default());
         }
 
         if self.pending_rx.remove(PendingRx::Rw) {
@@ -205,7 +308,7 @@ where
                     // Any other connection state is invalid at this point, and we need to kill it
                     // with fire.
                     pkt.hdr.set_op(uapi::VSOCK_OP_RST);
-                    return Ok(());
+                    return Ok(ReadResult::default());
                 }
             }
 
@@ -214,17 +317,17 @@ where
             if self.need_credit_update_from_peer() {
                 self.last_fwd_cnt_to_peer = self.fwd_cnt;
                 pkt.hdr.set_op(uapi::VSOCK_OP_CREDIT_REQUEST);
-                return Ok(());
+                return Ok(ReadResult::default());
             }
 
             // The maximum amount of data we can read in is limited by both the RX buffer size and
             // the peer available buffer space.
             let max_len = std::cmp::min(pkt.buf_size(), self.peer_avail_credit());
 
-            // Read data from the stream straight to the RX buffer, for maximum throughput.
-            match pkt.read_at_offset_from(&mut self.stream, 0, max_len) {
-                Ok(read_cnt) => {
-                    if read_cnt == 0 {
+            let recv_res = self.recv_into(pkt, max_len);
+            match recv_res {
+                Ok(res) => {
+                    if res.bytes_read == 0 {
                         // A 0-length read means the host stream was closed down. In that case,
                         // we'll ask our peer to shut down the connection. We can neither send nor
                         // receive any more data.
@@ -241,12 +344,19 @@ where
                         // length of the read data.
                         // Safe to unwrap because read_cnt is no more than max_len, which is bounded
                         // by self.peer_avail_credit(), a u32 internally.
-                        pkt.hdr.set_op(uapi::VSOCK_OP_RW).set_len(read_cnt);
-                        METRICS.rx_bytes_count.add(read_cnt as u64);
+                        pkt.hdr.set_op(uapi::VSOCK_OP_RW).set_len(res.bytes_read);
+                        METRICS.rx_bytes_count.add(res.bytes_read as u64);
                     }
                     self.rx_cnt += Wrapping(pkt.hdr.len());
                     self.last_fwd_cnt_to_peer = self.fwd_cnt;
-                    return Ok(());
+
+                    // the read was buffered into an intermediate vector and this
+                    // means there is still data to process but no fd event will
+                    // kick off. manually push a a PendingRx queue entry
+                    if res.should_retrigger {
+                        self.pending_rx.insert(PendingRx::Rw);
+                    }
+                    return Ok(res);
                 }
                 Err(VsockError::GuestMemoryMmap(GuestMemoryError::IOError(err)))
                     if err.kind() == ErrorKind::WouldBlock =>
@@ -269,7 +379,7 @@ where
                     );
                     pkt.hdr.set_op(uapi::VSOCK_OP_RST);
                     self.last_fwd_cnt_to_peer = self.fwd_cnt;
-                    return Ok(());
+                    return Ok(ReadResult::default());
                 }
             };
         }
@@ -280,7 +390,7 @@ where
         if self.pending_rx.remove(PendingRx::CreditUpdate) && !self.has_pending_rx() {
             pkt.hdr.set_op(uapi::VSOCK_OP_CREDIT_UPDATE);
             self.last_fwd_cnt_to_peer = self.fwd_cnt;
-            return Ok(());
+            return Ok(ReadResult::default());
         }
 
         // We've already checked for all conditions that would have produced a packet, so
@@ -513,7 +623,15 @@ where
         peer_port: u32,
         peer_buf_alloc: u32,
         vsock_type: VsockType,
+        conn_buffer_size: Option<usize>,
     ) -> Self {
+        let connection_buffer = match vsock_type {
+            VsockType::Seqpacket => Some(vec![
+                0u8;
+                conn_buffer_size.unwrap_or(DEFAULT_CONN_BUFFER_SIZE)
+            ]),
+            VsockType::Stream => None,
+        };
         Self {
             local_cid,
             peer_cid,
@@ -530,6 +648,8 @@ where
             pending_rx: PendingRxSet::from(PendingRx::Response),
             expiry: None,
             vsock_type,
+            connection_buffer,
+            conn_buffer_wrote_bytes: 0,
         }
     }
 
@@ -541,7 +661,15 @@ where
         local_port: u32,
         peer_port: u32,
         vsock_type: VsockType,
+        conn_buffer_size: Option<usize>,
     ) -> Self {
+        let connection_buffer = match vsock_type {
+            VsockType::Seqpacket => Some(vec![
+                0u8;
+                conn_buffer_size.unwrap_or(DEFAULT_CONN_BUFFER_SIZE)
+            ]),
+            VsockType::Stream => None,
+        };
         Self {
             local_cid,
             peer_cid,
@@ -558,6 +686,8 @@ where
             pending_rx: PendingRxSet::from(PendingRx::Request),
             expiry: None,
             vsock_type,
+            connection_buffer,
+            conn_buffer_wrote_bytes: 0,
         }
     }
 
@@ -893,6 +1023,7 @@ mod tests {
                     PEER_PORT,
                     PEER_BUF_ALLOC,
                     VsockType::Stream,
+                    None,
                 ),
                 ConnState::LocalInit => VsockConnection::<TestStream>::new_local_init(
                     stream,
@@ -901,6 +1032,7 @@ mod tests {
                     LOCAL_PORT,
                     PEER_PORT,
                     VsockType::Stream,
+                    None,
                 ),
                 ConnState::Established => {
                     let mut conn = VsockConnection::<TestStream>::new_peer_init(
@@ -911,6 +1043,7 @@ mod tests {
                         PEER_PORT,
                         PEER_BUF_ALLOC,
                         VsockType::Stream,
+                        None,
                     );
                     assert!(conn.has_pending_rx());
                     conn.recv_pkt(&mut rx_pkt).unwrap();
