@@ -443,7 +443,7 @@ impl VsockMuxer {
                 if let Some(EpollListener::LocalStream(mut stream)) = self.remove_listener(fd) {
                     // SAFETY: Safe because the fd is valid and we own it (removed from
                     // listener_map).
-                    Self::read_local_stream_port(&mut stream)
+                    Self::read_local_stream_port(&mut stream, &self.vsock_type)
                         .map(|peer_port| (self.allocate_local_port(), peer_port))
                         .and_then(|(local_port, peer_port)| {
                             self.add_connection(
@@ -479,28 +479,43 @@ impl VsockMuxer {
     }
 
     /// Parse a host "connect" command, and extract the destination vsock port.
-    fn read_local_stream_port(stream: &mut dyn Read) -> Result<u32, VsockUnixBackendError> {
+    fn read_local_stream_port(
+        stream: &mut dyn Read,
+        vsock_type: &VsockType,
+    ) -> Result<u32, VsockUnixBackendError> {
         let mut buf = [0u8; 32];
 
-        // This is the minimum number of bytes that we should be able to read, when parsing a
-        // valid connection request. I.e. `b"connect 0\n".len()`.
-        const MIN_READ_LEN: usize = 10;
+        let blen = match vsock_type {
+            VsockType::Seqpacket => {
+                // Seqpacket delivers the entire message atomically, so a single read gets it
+                // all. Using read_exact would silently truncate messages longer than
+                // MIN_READ_LEN bytes (e.g. "connect 525\n"), discarding the remainder.
+                stream
+                    .read(&mut buf)
+                    .map_err(VsockUnixBackendError::UnixRead)?
+            }
+            VsockType::Stream => {
+                // This is the minimum number of bytes that we should be able to read, when
+                // parsing a valid connection request. I.e. `b"connect 0\n".len()`.
+                const MIN_READ_LEN: usize = 10;
 
-        // Bring in the minimum number of bytes that we should be able to read.
-        stream
-            .read_exact(&mut buf[..MIN_READ_LEN])
-            .map_err(VsockUnixBackendError::UnixRead)?;
+                // Bring in the minimum number of bytes that we should be able to read.
+                stream
+                    .read_exact(&mut buf[..MIN_READ_LEN])
+                    .map_err(VsockUnixBackendError::UnixRead)?;
 
-        // Now, finish reading the destination port number, by bringing in one byte at a time,
-        // until we reach an EOL terminator (or our buffer space runs out).  Yeah, not
-        // particularly proud of this approach, but it will have to do for now.
-        let mut blen = MIN_READ_LEN;
-        while buf[blen - 1] != b'\n' && blen < buf.len() {
-            stream
-                .read_exact(&mut buf[blen..=blen])
-                .map_err(VsockUnixBackendError::UnixRead)?;
-            blen += 1;
-        }
+                // Now, finish reading the destination port number, by bringing in one byte at
+                // a time, until we reach an EOL terminator (or our buffer space runs out).
+                let mut blen = MIN_READ_LEN;
+                while buf[blen - 1] != b'\n' && blen < buf.len() {
+                    stream
+                        .read_exact(&mut buf[blen..=blen])
+                        .map_err(VsockUnixBackendError::UnixRead)?;
+                    blen += 1;
+                }
+                blen
+            }
+        };
 
         let mut word_iter = std::str::from_utf8(&buf[..blen])
             .map_err(|_| VsockUnixBackendError::InvalidPortRequest)?
