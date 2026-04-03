@@ -65,6 +65,7 @@ pub struct VsockDeviceConfig {
     pub uds_path: String,
     /// the type of the underlying socket
     pub vsock_type: VsockType,
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "deserialize_conn_buffer_size")]
     /// the size of the intermediate connection buffer
