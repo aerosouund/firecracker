@@ -18,23 +18,33 @@ pub struct SeqpacketConn(std::os::fd::OwnedFd);
 
 impl SeqpacketConn {
     pub fn connect(path: &str) -> Result<Self, io::Error> {
-        let (addr_ptr, addr_len) = build_addr(path)?;
+        let (addr, addr_len) = build_addr(path)?;
 
         // SAFETY: Valid flags and socket type.
-        let fd = unsafe {
-            libc::socket(
-                libc::AF_UNIX,
-                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                0,
-            )
-        };
+        let fd =
+            unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
         if fd == -1 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Set non-blocking via FIONBIO ioctl (already allowed by seccomp filter)
+        // SAFETY: Valid fd, errors checked.
+        let mut nonblocking: libc::c_int = 1;
+        let ret = unsafe { libc::ioctl(fd, libc::FIONBIO, &mut nonblocking) };
+        if ret < 0 {
+            // Close fd before returning error to avoid fd leak
+            unsafe { libc::close(fd) };
             return Err(io::Error::last_os_error());
         }
 
         // SAFETY: Valid file descriptor and errors checked.
         unsafe {
-            if libc::connect(fd, addr_ptr, addr_len) == -1 {
+            if libc::connect(
+                fd,
+                &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                addr_len,
+            ) == -1
+            {
                 let err = io::Error::last_os_error();
                 libc::close(fd);
                 return Err(err);
@@ -70,7 +80,7 @@ impl Read for SeqpacketConn {
 impl Write for SeqpacketConn {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let ptr = buf.as_ptr().cast::<libc::c_void>();
-        let flags = libc::MSG_NOSIGNAL | libc::MSG_EOR;
+        let flags = libc::MSG_NOSIGNAL;
         // SAFETY: The file descriptor is valid and open. The buffer pointer is valid for reading
         // `buf.len()` bytes.
         let sent = unsafe { libc::send(self.0.as_raw_fd(), ptr, buf.len(), flags) };
@@ -155,11 +165,16 @@ impl SeqpacketListener {
             return Err(io::Error::last_os_error());
         }
 
-        let (addr_ptr, addr_len) = build_addr(path)?;
+        let (addr, addr_len) = build_addr(path)?;
 
         // SAFETY: Valid fd and addr pointer, closes fd on error
         unsafe {
-            if libc::bind(fd, addr_ptr, addr_len) == -1 {
+            if libc::bind(
+                fd,
+                &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                addr_len,
+            ) == -1
+            {
                 let err = io::Error::last_os_error();
                 libc::close(fd);
                 return Err(err);
@@ -192,7 +207,7 @@ pub trait Socket: AsRawFd + std::fmt::Debug {
 
 impl Socket for SeqpacketListener {
     fn accept(&self) -> Result<ConnBackend, io::Error> {
-        let flags = libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
+        let flags = libc::SOCK_CLOEXEC;
         let mut addr: libc::sockaddr_un = uninitialized_addres();
         let mut addr_len: libc::socklen_t = std::mem::size_of_val(&addr) as libc::socklen_t;
 
@@ -207,6 +222,16 @@ impl Socket for SeqpacketListener {
             )
         };
         if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Set non-blocking via FIONBIO ioctl (already allowed by seccomp filter)
+        // SAFETY: Valid fd, errors checked.
+        let mut nonblocking: libc::c_int = 1;
+        let ret = unsafe { libc::ioctl(fd, libc::FIONBIO, &mut nonblocking) };
+        if ret < 0 {
+            // Close fd before returning error to avoid fd leak
+            unsafe { libc::close(fd) };
             return Err(io::Error::last_os_error());
         }
 
@@ -227,7 +252,7 @@ impl Socket for UnixListener {
     }
 }
 
-fn build_addr(path: &str) -> Result<(*const libc::sockaddr, u32), io::Error> {
+fn build_addr(path: &str) -> Result<(libc::sockaddr_un, u32), io::Error> {
     let mut addr: libc::sockaddr_un = uninitialized_addres();
     addr.sun_family = libc::AF_UNIX as _;
     let max_addr = std::mem::size_of_val(&addr.sun_path);
@@ -250,10 +275,7 @@ fn build_addr(path: &str) -> Result<(*const libc::sockaddr, u32), io::Error> {
             path.len().min(addr.sun_path.len()),
         );
     };
-    Ok((
-        (&addr as *const libc::sockaddr_un).cast::<libc::sockaddr>(),
-        std::mem::size_of::<libc::sockaddr_un>() as u32,
-    ))
+    Ok((addr, std::mem::size_of::<libc::sockaddr_un>() as u32))
 }
 
 fn uninitialized_addres() -> libc::sockaddr_un {
