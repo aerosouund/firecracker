@@ -22,9 +22,9 @@ pub use vm_memory::{
     GuestUsize, MemoryRegionAddress, MmapRegion, address,
 };
 use vm_memory::{GuestMemoryError, GuestMemoryRegionBytes, VolatileSlice, WriteVolatile};
-use vmm_sys_util::errno;
 
-use crate::utils::{get_page_size, u64_to_usize};
+use crate::arch::host_page_size;
+use crate::utils::u64_to_usize;
 use crate::vmm_config::machine_config::HugePageConfig;
 use crate::vstate::vm::VmError;
 use crate::{DirtyBitmap, Vm};
@@ -39,8 +39,6 @@ pub type GuestMmapRegion = vm_memory::MmapRegion<Option<AtomicBitmap>>;
 /// Errors associated with dumping guest memory to file.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum MemoryError {
-    /// Cannot fetch system's page size: {0}
-    PageSize(errno::Error),
     /// Cannot dump memory: {0}
     WriteMemory(GuestMemoryError),
     /// Cannot create mmap region: {0}
@@ -235,14 +233,6 @@ impl<'a> GuestMemorySlot<'a> {
     }
 }
 
-fn addr_in_range(addr: GuestAddress, start: GuestAddress, len: usize) -> bool {
-    if let Some(end) = start.checked_add(len as u64) {
-        addr >= start && addr < end
-    } else {
-        false
-    }
-}
-
 impl GuestRegionMmapExt {
     /// Adds a DRAM region which only contains a single plugged slot
     pub(crate) fn dram_from_mmap_region(region: GuestRegionMmap, slot: u32) -> Self {
@@ -345,11 +335,17 @@ impl GuestRegionMmapExt {
         len: usize,
     ) -> impl Iterator<Item = GuestMemorySlot<'_>> {
         self.slots().map(|(slot, _)| slot).filter(move |slot| {
-            if let Some(slot_end) = slot.guest_addr.checked_add(slot.slice.len() as u64) {
-                addr_in_range(slot.guest_addr, from, len) || addr_in_range(slot_end, from, len)
-            } else {
-                false
-            }
+            // Two intervals [a, b) and [c, d) intersect iff a < d && c < b.
+            // This correctly handles the containment case where the slot fully
+            // contains the range (or vice versa).
+            let slot_start = slot.guest_addr;
+            let Some(slot_end) = slot_start.checked_add(slot.slice.len() as u64) else {
+                return false;
+            };
+            let Some(range_end) = from.checked_add(len as u64) else {
+                return false;
+            };
+            slot_start < range_end && from < slot_end
         })
     }
 
@@ -709,7 +705,7 @@ impl GuestMemoryExtension for GuestMemoryMmap {
         writer: &mut T,
         dirty_bitmap: &DirtyBitmap,
     ) -> Result<(), MemoryError> {
-        let page_size = get_page_size().map_err(MemoryError::PageSize)?;
+        let page_size = host_page_size();
 
         let write_result =
             self.iter()
@@ -872,9 +868,10 @@ mod tests {
     use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
+    use crate::arch::host_page_size;
     use crate::snapshot::Snapshot;
     use crate::test_utils::single_region_mem;
-    use crate::utils::{get_page_size, mib_to_bytes};
+    use crate::utils::mib_to_bytes;
     use crate::vstate::memory::test_utils::into_region_ext;
 
     #[test]
@@ -949,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_mark_dirty() {
-        let page_size = get_page_size().unwrap();
+        let page_size = host_page_size();
         let region_size = page_size * 3;
 
         let regions = vec![
@@ -1009,7 +1006,7 @@ mod tests {
 
     #[test]
     fn test_serde() {
-        let page_size = get_page_size().unwrap();
+        let page_size = host_page_size();
         let region_size = page_size * 3;
 
         // Test with a single region
@@ -1036,7 +1033,7 @@ mod tests {
 
     #[test]
     fn test_describe() {
-        let page_size: usize = get_page_size().unwrap();
+        let page_size: usize = host_page_size();
 
         // Two regions of one page each, with a one page gap between them.
         let mem_regions = [
@@ -1099,7 +1096,7 @@ mod tests {
 
     #[test]
     fn test_dump() {
-        let page_size = get_page_size().unwrap();
+        let page_size = host_page_size();
 
         // Two regions of two pages each, with a one page gap between them.
         let region_1_address = GuestAddress(0);
@@ -1151,7 +1148,7 @@ mod tests {
 
     #[test]
     fn test_dump_dirty() {
-        let page_size = get_page_size().unwrap();
+        let page_size = host_page_size();
 
         // Two regions of two pages each, with a one page gap between them.
         let region_1_address = GuestAddress(0);
@@ -1316,7 +1313,7 @@ mod tests {
 
     #[test]
     fn test_store_dirty_bitmap() {
-        let page_size = get_page_size().unwrap();
+        let page_size = host_page_size();
 
         // Two regions of three pages each, with a one page gap between them.
         let region_1_address = GuestAddress(0);
@@ -1464,6 +1461,59 @@ mod tests {
         );
     }
 
+    /// Verifies that `slots_intersecting_range` returns the correct slots for
+    /// ranges at slot boundaries, interior to a slot, and spanning two slots.
+    #[test]
+    fn test_slots_intersecting_range() {
+        let page_size = host_page_size();
+        let slot_size = 4 * page_size;
+        let region_size = 2 * slot_size;
+        let base = GuestAddress(0);
+        let slot1_base = base.unchecked_add(slot_size as u64);
+
+        let mmap_region = anonymous(
+            std::iter::once((base, region_size)),
+            false,
+            HugePageConfig::None,
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+        let region = GuestRegionMmapExt::hotpluggable_from_mmap_region(mmap_region, 0, slot_size);
+        assert_eq!(region.slot_cnt(), 2);
+
+        // (range_offset_in_pages, range_len_in_pages, expected_slot_addrs)
+        let cases: &[(usize, usize, &[GuestAddress])] = &[
+            // At slot 0 boundary
+            (0, 1, &[base]),
+            // Interior to slot 0
+            (1, 1, &[base]),
+            // Interior to slot 1
+            (5, 1, &[slot1_base]),
+            // Spanning slot 0 and slot 1
+            (3, 2, &[base, slot1_base]),
+            // Entire region
+            (0, 8, &[base, slot1_base]),
+            // Outside the region
+            (8, 1, &[]),
+            // Zero-length range
+            (0, 0, &[]),
+        ];
+
+        for &(offset_pages, len_pages, expected) in cases {
+            let from = base.unchecked_add((offset_pages * page_size) as u64);
+            let len = len_pages * page_size;
+            let found: Vec<_> = region.slots_intersecting_range(from, len).collect();
+            let addrs: Vec<_> = found.iter().map(|s| s.guest_addr).collect();
+            assert_eq!(
+                addrs, expected,
+                "offset={offset_pages} pages, len={len_pages} pages"
+            );
+        }
+    }
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     mod prop_tests {
         use std::io::{Read, Seek, SeekFrom};
@@ -1482,7 +1532,7 @@ mod tests {
             writer: &mut File,
             dirty_bitmap: &DirtyBitmap,
         ) -> usize {
-            let page_size = get_page_size().map_err(MemoryError::PageSize).unwrap();
+            let page_size = host_page_size();
             let mut dirty_count = 0;
             for (slot, plugged) in mem.iter().flat_map(|r| r.slots()) {
                 if !plugged {
@@ -1594,7 +1644,7 @@ mod tests {
 
         /// Build a GuestMemoryMmap and KVM dirty bitmap from region specs.
         fn build_memory(specs: &[RegionSpec]) -> (GuestMemoryMmap, DirtyBitmap, usize) {
-            let page_size = get_page_size().unwrap();
+            let page_size = host_page_size();
             let mut slot_from = 0u32;
             let mut regions = Vec::new();
             let mut kvm_bitmap: DirtyBitmap = HashMap::new();
@@ -1651,7 +1701,7 @@ mod tests {
             fn dump_dirty_correctness(
                 region_specs in proptest::collection::vec(region_spec(), 1..=3),
             ) {
-                let page_size = get_page_size().unwrap();
+                let page_size = host_page_size();
                 let (guest_memory, kvm_bitmap, total_size) =
                     build_memory(&region_specs);
 
@@ -1720,7 +1770,7 @@ mod tests {
             fn store_dirty_bitmap_correctness(
                 region_specs in proptest::collection::vec(region_spec(), 1..=3),
             ) {
-                let page_size = get_page_size().unwrap();
+                let page_size = host_page_size();
                 let (guest_memory, kvm_bitmap, _) = build_memory(&region_specs);
 
                 guest_memory.store_dirty_bitmap(&kvm_bitmap, page_size);

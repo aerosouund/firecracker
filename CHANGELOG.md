@@ -10,6 +10,11 @@ and this project adheres to
 
 ### Added
 
+- [#5323](https://github.com/firecracker-microvm/firecracker/pull/5323): Add
+  support for Vsock Unix domain socket path overriding on snapshot restore. More
+  information can be found in the
+  [docs](docs/vsock.md/#unix-domain-socket-renaming).
+
 ### Changed
 
 ### Deprecated
@@ -18,7 +23,35 @@ and this project adheres to
 
 ### Fixed
 
-## [v1.15.0]
+- [#5762](https://github.com/firecracker-microvm/firecracker/pull/5762): Cap
+  virtio-rng per-request entropy to 64 KiB. Previously, a guest could construct
+  a descriptor chain that caused Firecracker to allocate more host memory than
+  the guest actually provided, potentially leading to excessive host memory
+  consumption.
+- [#5760](https://github.com/firecracker-microvm/firecracker/pull/5760): Fixed
+  HID (Hardware ID) of VMGenID device so that it aligns with the upstream Linux
+  kernel. This caused the driver not to be bound correctly to the device prior
+  to Linux kernel 6.10.
+- [#5764](https://github.com/firecracker-microvm/firecracker/pull/5764): Fixed a
+  bug that caused the guest UART driver to get stuck and stop transmitting after
+  snapshot restore. The bug was triggered by taking a snapshot while a serial
+  transmission was taking place. On restore the driver would wait for a TX
+  interrupt that would never arrive and no output would appear in the serial
+  console.
+- [#5780](https://github.com/firecracker-microvm/firecracker/pull/5780): Fixed
+  missing `/sys/devices/system/cpu/cpu*/cache/*` in aarch64 guests when running
+  on host kernels >= 6.3 with guest kernels >= 6.1.156.
+- [#5793](https://github.com/firecracker-microvm/firecracker/pull/5793): Fixed
+  virtio-mem plug/unplug skipping KVM slot updates for memory blocks not aligned
+  to a slot boundary. On plug, this could leave hotplugged memory inaccessible
+  to the guest. On unplug, the guest could retain access to memory that
+  Firecracker considered freed.
+- [#5794](https://github.com/firecracker-microvm/firecracker/pull/5794): Bound
+  balloon statistics descriptor length to prevent a guest-controlled oversized
+  descriptor from temporarily stalling the VMM event loop. Only affects microVMs
+  with `stats_polling_interval_s > 0`.
+
+## [1.15.0]
 
 ### Added
 
@@ -76,7 +109,7 @@ and this project adheres to
 - [#5739](https://github.com/firecracker-microvm/firecracker/pull/5739): Fixed
   validation of TCP SYN options length when MMDS is enabled.
 
-## [v1.14.0]
+## [1.14.0]
 
 ### Added
 
