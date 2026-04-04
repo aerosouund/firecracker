@@ -313,8 +313,8 @@ def test_vsock_transport_reset_g2h(uvm_plain_any, microvm_factory):
         new_vm.kill()
 
 
-def test_vsock_seqpacket_h2g(uvm_plain_any, bin_vsock_seqpacket_listener_path, test_fc_session_root_path):
-    vm = uvm_plain_any
+def test_vsock_seqpacket_h2g(uvm_plain_6_1, bin_vsock_seqpacket_listener_path, test_fc_session_root_path):
+    vm = uvm_plain_6_1
     vm.spawn()
     vm.basic_config()
     vm.add_net_iface()
@@ -338,8 +338,8 @@ def test_vsock_seqpacket_h2g(uvm_plain_any, bin_vsock_seqpacket_listener_path, t
     validate_fc_metrics(metrics)
 
 
-def test_vsock_seqpacket_g2h(uvm_plain_any, bin_vsock_seqpacket_listener_path, bin_vsock_path, test_fc_session_root_path):
-    vm = uvm_plain_any
+def test_vsock_seqpacket_g2h(uvm_plain_6_1, bin_vsock_seqpacket_listener_path, bin_vsock_path, test_fc_session_root_path):
+    vm = uvm_plain_6_1
     vm.spawn()
     vm.basic_config()
     vm.add_net_iface()
@@ -364,11 +364,11 @@ def test_vsock_seqpacket_g2h(uvm_plain_any, bin_vsock_seqpacket_listener_path, b
     validate_fc_metrics(metrics)
 
 
-def test_vsock_seqpacket_h2g_overflow(uvm_plain_any, bin_vsock_seqpacket_listener_path, test_fc_session_root_path):
+def test_vsock_seqpacket_h2g_overflow(uvm_plain_6_1, bin_vsock_seqpacket_listener_path, test_fc_session_root_path):
     """Test that sending a message larger than conn_buffer_size errors."""
     conn_buffer_size = 16 * 1024
 
-    vm = uvm_plain_any
+    vm = uvm_plain_6_1
     vm.spawn()
     vm.basic_config()
     vm.add_net_iface()
