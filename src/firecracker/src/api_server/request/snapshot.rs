@@ -110,7 +110,6 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
             || snapshot_config.track_dirty_pages,
         resume_vm: snapshot_config.resume_vm,
         network_overrides: snapshot_config.network_overrides,
-        vsock_override: snapshot_config.vsock_override,
     };
 
     // Construct the `ParsedRequest` object.
@@ -188,7 +187,6 @@ mod tests {
             track_dirty_pages: false,
             resume_vm: false,
             network_overrides: vec![],
-            vsock_override: None,
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -219,7 +217,6 @@ mod tests {
             track_dirty_pages: true,
             resume_vm: false,
             network_overrides: vec![],
-            vsock_override: None,
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -250,7 +247,6 @@ mod tests {
             track_dirty_pages: false,
             resume_vm: true,
             network_overrides: vec![],
-            vsock_override: None,
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -290,7 +286,6 @@ mod tests {
                 iface_id: String::from("eth0"),
                 host_dev_name: String::from("vmtap2"),
             }],
-            vsock_override: None,
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -318,7 +313,6 @@ mod tests {
             track_dirty_pages: false,
             resume_vm: true,
             network_overrides: vec![],
-            vsock_override: None,
         };
         let parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert_eq!(

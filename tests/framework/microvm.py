@@ -1083,7 +1083,6 @@ class Microvm:
         snapshot: Snapshot,
         resume: bool = False,
         rename_interfaces: dict = None,
-        vsock_override: str = None,
         *,
         uffd_handler_name: str = None,
     ):
@@ -1139,9 +1138,6 @@ class Microvm:
             # parameter. Once the release baseline has moved, this assignment
             # can be inline in the snapshot_load command below
             optional_kwargs["network_overrides"] = iface_overrides
-
-        if vsock_override is not None:
-            optional_kwargs["vsock_override"] = {"uds_path": vsock_override}
 
         self.api.snapshot_load.put(
             mem_backend=mem_backend,
