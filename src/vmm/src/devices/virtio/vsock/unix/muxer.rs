@@ -50,8 +50,8 @@ use crate::devices::virtio::vsock::csm::VsockConnection;
 use crate::devices::virtio::vsock::defs::uapi::{VSOCK_TYPE_SEQPACKET, VSOCK_TYPE_STREAM};
 use crate::devices::virtio::vsock::metrics::METRICS;
 use crate::devices::virtio::vsock::packet::{VsockPacketRx, VsockPacketTx};
-use crate::devices::virtio::vsock::unix::ConnBackend;
 use crate::devices::virtio::vsock::unix::seqpacket::{SeqpacketConn, SeqpacketListener, Socket};
+use crate::devices::virtio::vsock::unix::{ConnBackend, ReadResult};
 use crate::logger::IncMetric;
 use crate::vmm_config::vsock::VsockType;
 
@@ -134,7 +134,7 @@ impl VsockChannel for VsockMuxer {
     /// Retuns:
     /// - `Ok(())`: `pkt` has been successfully filled in; or
     /// - `Err(VsockError::NoData)`: there was no available data with which to fill in the packet.
-    fn recv_pkt(&mut self, pkt: &mut VsockPacketRx) -> Result<(), VsockError> {
+    fn recv_pkt(&mut self, pkt: &mut VsockPacketRx) -> Result<ReadResult, VsockError> {
         // We'll look for instructions on how to build the RX packet in the RX queue. If the
         // queue is empty, that doesn't necessarily mean we don't have any pending RX, since
         // the queue might be out-of-sync. If that's the case, we'll attempt to sync it first,
@@ -165,7 +165,7 @@ impl VsockChannel for VsockMuxer {
                         VsockType::Stream => pkt.hdr.set_type(VSOCK_TYPE_STREAM),
                     };
                     self.rxq.pop().unwrap();
-                    return Ok(());
+                    return Ok(ReadResult::default());
                 }
 
                 // We'll defer building the packet to this connection, since it has something
@@ -196,7 +196,7 @@ impl VsockChannel for VsockMuxer {
                 }
 
                 debug!("vsock muxer: RX pkt: {:?}", pkt.hdr);
-                return Ok(());
+                return Ok(ReadResult::default());
             }
         }
 
@@ -443,6 +443,7 @@ impl VsockMuxer {
                                     local_port,
                                     peer_port,
                                     self.vsock_type.clone(),
+                                    None,
                                 ),
                             )
                         })
@@ -672,6 +673,7 @@ impl VsockMuxer {
                                 pkt.hdr.src_port(),
                                 pkt.hdr.buf_alloc(),
                                 VsockType::Stream,
+                                None,
                             ),
                         )
                     })
@@ -694,6 +696,7 @@ impl VsockMuxer {
                                 pkt.hdr.src_port(),
                                 pkt.hdr.buf_alloc(),
                                 VsockType::Seqpacket,
+                                None,
                             ),
                         )
                     })
