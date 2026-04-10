@@ -197,19 +197,8 @@ impl VsockChannel for VsockMuxer {
                     });
                 }
 
-                match res {
-                    Ok(read_res) => {
-                        // the read was buffered into an intermediate vector and this
-                        // means there is still data to process but no fd event will
-                        // kick off. manually push a a PendingRx queue entry
-                        if read_res.should_retrigger {
-                            self.rxq.push(rx);
-                        }
-                        return Ok(read_res);
-                    }
-                    Err(e) => return Err(e),
-                }
-                return res;
+                debug!("vsock muxer: RX pkt: {:?}", pkt.hdr);
+                return Ok(ReadResult::default());
             }
         }
 
