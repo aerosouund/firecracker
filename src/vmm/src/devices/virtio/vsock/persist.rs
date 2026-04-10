@@ -81,6 +81,7 @@ impl Persist<'_> for VsockUnixBackend {
             constructor_args.cid,
             state.uds_path.clone(),
             state.vsock_type.clone(),
+            None,
         )?;
         backend.local_port_last = state.local_port_last;
         Ok(backend)

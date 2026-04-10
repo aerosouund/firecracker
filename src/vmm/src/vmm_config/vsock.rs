@@ -127,6 +127,7 @@ impl VsockBuilder {
             u64::from(cfg.guest_cid),
             cfg.uds_path.clone(),
             cfg.vsock_type.clone(),
+            None,
         )?;
 
         Vsock::new(u64::from(cfg.guest_cid), backend).map_err(VsockConfigError::CreateVsockDevice)
