@@ -163,8 +163,7 @@ impl VsockBuilder {
             cfg.conn_buffer_size,
         )?;
 
-        Vsock::new(u64::from(cfg.guest_cid), backend, &cfg.vsock_type)
-            .map_err(VsockConfigError::CreateVsockDevice)
+        Vsock::new(u64::from(cfg.guest_cid), backend).map_err(VsockConfigError::CreateVsockDevice)
     }
 
     /// Returns the structure used to configure the vsock device.

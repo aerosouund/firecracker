@@ -42,7 +42,6 @@ use crate::devices::virtio::vsock::metrics::METRICS;
 use crate::impl_device_type;
 use crate::logger::{IncMetric, error, info, warn};
 use crate::utils::byte_order;
-use crate::vmm_config::vsock::VsockType;
 use crate::vstate::memory::{Bytes, GuestMemoryMmap};
 
 pub(crate) const RXQ_INDEX: usize = 0;
@@ -55,8 +54,11 @@ pub(crate) const VIRTIO_VSOCK_EVENT_TRANSPORT_RESET: u32 = 0;
 /// - VIRTIO_F_VERSION_1: the device conforms to at least version 1.0 of the VirtIO spec.
 /// - VIRTIO_F_IN_ORDER: the device returns used buffers in the same order that the driver makes
 ///   them available.
-pub(crate) const AVAIL_FEATURES: u64 =
-    (1 << VIRTIO_F_VERSION_1 as u64) | (1 << VIRTIO_F_IN_ORDER as u64);
+/// - VIRTIO_VSOCK_F_SEQPACKET: the device supports vsock connections backed by seqpacket
+///   sockets.
+pub(crate) const AVAIL_FEATURES: u64 = (1 << VIRTIO_F_VERSION_1 as u64)
+    | (1 << VIRTIO_F_IN_ORDER as u64)
+    | (1 << VIRTIO_VSOCK_F_SEQPACKET as u64);
 
 /// Structure representing the vsock device.
 #[derive(Debug)]
@@ -93,25 +95,19 @@ where
     pub fn with_queues(
         cid: u64,
         backend: B,
-        vsock_type: &VsockType,
         queues: Vec<VirtQueue>,
     ) -> Result<Vsock<B>, VsockError> {
         let mut queue_events = Vec::new();
         for _ in 0..queues.len() {
             queue_events.push(EventFd::new(libc::EFD_NONBLOCK).map_err(VsockError::EventFd)?);
         }
-        // Start with the basic features and if the type is seqpacket add the seqpacket bit.
-        let features = AVAIL_FEATURES;
-        if let VsockType::Seqpacket = vsock_type {
-            features | (1 << VIRTIO_VSOCK_F_SEQPACKET);
-        };
 
         Ok(Vsock {
             cid,
             queues,
             queue_events,
             backend,
-            avail_features: features,
+            avail_features: AVAIL_FEATURES,
             acked_features: 0,
             activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(VsockError::EventFd)?,
             device_state: DeviceState::Inactive,
@@ -121,12 +117,12 @@ where
     }
 
     /// Create a new virtio-vsock device with the given VM CID and vsock backend.
-    pub fn new(cid: u64, backend: B, vsock_type: &VsockType) -> Result<Vsock<B>, VsockError> {
+    pub fn new(cid: u64, backend: B) -> Result<Vsock<B>, VsockError> {
         let queues: Vec<VirtQueue> = defs::VSOCK_QUEUE_SIZES
             .iter()
             .map(|&max_size| VirtQueue::new(max_size))
             .collect();
-        Self::with_queues(cid, backend, vsock_type, queues)
+        Self::with_queues(cid, backend, queues)
     }
 
     /// Retrieve the cid associated with this vsock device.
@@ -178,9 +174,6 @@ where
             let used_len = match self.rx_packet.parse(mem, head) {
                 Ok(()) => match self.backend.recv_pkt(&mut self.rx_packet) {
                     Err(_) => {
-                        // We are using a consuming iterator over the virtio buffers, so, if we
-                        // can't fill in this buffer, we'll need to undo the
-                        // last iterator step.
                         queue.undo_pop();
                         break;
                     }
