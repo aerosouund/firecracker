@@ -367,15 +367,6 @@ where
             q.initialize(&mem)
                 .map_err(ActivateError::QueueMemoryError)?;
         }
-        // The guest should ack the seqpacket feature if we requested seqpacket
-        // sockets. Raise an error if it didn't happen.
-        if let VsockType::Seqpacket = self.backend().save()
-            && self.acked_features & (1 << VIRTIO_VSOCK_F_SEQPACKET) == 0
-        {
-            return Err(ActivateError::RequiredFeatureNotAcked(
-                "VIRTIO_VSOCK_F_SEQPACKET not acked by the guest kernel",
-            ));
-        }
 
         if self.queues.len() != defs::VSOCK_NUM_QUEUES {
             METRICS.activate_fails.inc();
