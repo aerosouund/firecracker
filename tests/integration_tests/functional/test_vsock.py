@@ -38,7 +38,6 @@ from framework.utils_vsock import (
     make_blob,
     make_host_port_path,
     start_guest_echo_server,
-    start_seqpacket_echo_server,
 )
 from host_tools.fcmetrics import validate_fc_metrics
 
@@ -297,9 +296,7 @@ def test_vsock_transport_reset_g2h(vsock_uvm, microvm_factory):
         new_vm.kill()
 
 
-def test_vsock_seqpacket_h2g(
-    uvm_plain_6_1, bin_vsock_seqpacket_listener_path, test_fc_session_root_path
-):
+def test_vsock_seqpacket_h2g(uvm_plain_6_1, test_fc_session_root_path):
     """Test host-to-guest vsock seqpacket connections."""
     vm = uvm_plain_6_1
     vm.spawn()
@@ -321,21 +318,15 @@ def test_vsock_seqpacket_h2g(
         vm.ssh,
         blob_path,
         vm_blob_path,
-        vsock_seq_server=bin_vsock_seqpacket_listener_path,
     )
-    path = start_seqpacket_echo_server(vm)
+    path = start_guest_echo_server(vm, 5)
 
     check_host_connections(path, blob_path, blob_hash, SOCK_SEQPACKET)
     metrics = vm.flush_metrics()
     validate_fc_metrics(metrics)
 
 
-def test_vsock_seqpacket_g2h(
-    uvm_plain_6_1,
-    bin_vsock_seqpacket_listener_path,
-    bin_vsock_path,
-    test_fc_session_root_path,
-):
+def test_vsock_seqpacket_g2h(uvm_plain_6_1, bin_vsock_path, test_fc_session_root_path):
     """Test guest-to-host vsock seqpacket connections."""
     vm = uvm_plain_6_1
     vm.spawn()
@@ -356,17 +347,13 @@ def test_vsock_seqpacket_g2h(
     _copy_vsock_data_to_guest(vm.ssh, blob_path, vm_blob_path, bin_vsock_path)
 
     path = os.path.join(vm.path, make_host_port_path(VSOCK_UDS_PATH, ECHO_SERVER_PORT))
-    check_guest_connections_seqpacket(
-        vm, path, bin_vsock_seqpacket_listener_path, vm_blob_path, blob_hash
-    )
+    check_guest_connections_seqpacket(vm, path, vm_blob_path, blob_hash)
 
     metrics = vm.flush_metrics()
     validate_fc_metrics(metrics)
 
 
-def test_vsock_seqpacket_h2g_overflow(
-    uvm_plain_6_1, bin_vsock_seqpacket_listener_path, test_fc_session_root_path
-):
+def test_vsock_seqpacket_h2g_overflow(uvm_plain_6_1, test_fc_session_root_path):
     """Test that sending a message larger than conn_buffer_size errors."""
     conn_buffer_size = 16 * 1024
 
@@ -389,9 +376,8 @@ def test_vsock_seqpacket_h2g_overflow(
         vm.ssh,
         blob_path,
         vm_blob_path,
-        vsock_seq_server=bin_vsock_seqpacket_listener_path,
     )
-    path = start_seqpacket_echo_server(vm)
+    path = start_guest_echo_server(vm, 5)
 
     worker_error = None
 

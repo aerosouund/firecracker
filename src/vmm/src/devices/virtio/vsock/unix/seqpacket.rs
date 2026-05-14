@@ -10,7 +10,7 @@ use std::os::unix::net::UnixListener;
 use std::fmt::Debug;
 use vm_memory::{ReadVolatile, VolatileMemoryError, WriteVolatile};
 
-use crate::devices::virtio::vsock::unix::ConnBackend;
+use crate::devices::virtio::vsock::unix::{ConnBackend, Socket};
 
 #[derive(Debug)]
 pub struct SeqpacketConn(std::os::fd::OwnedFd);
@@ -197,10 +197,6 @@ impl AsRawFd for SeqpacketListener {
     fn as_raw_fd(&self) -> i32 {
         self.0.as_raw_fd()
     }
-}
-
-pub trait Socket: AsRawFd + Debug + Send {
-    fn accept(&self) -> Result<ConnBackend, io::Error>;
 }
 
 impl Socket for SeqpacketListener {

@@ -133,9 +133,7 @@ pub enum VsockError {
     /// Tried to push to full IovDeque.
     IovDequeOverflow,
     /// Message too big for the intermediate connection buffer. buffer length {0}, incoming size {1}
-    MessageTooLong(u32, u32),
-    /// Encountered an error while processing a volatile memory read/write.
-    VolatileMemory(VolatileMemoryError)
+    MessageTooLong(usize, usize),
 }
 
 impl From<IoVecError> for VsockError {
@@ -163,6 +161,11 @@ pub trait VsockEpollListener: AsRawFd {
     fn notify(&mut self, evset: EventSet);
 }
 
+/// An object that can inform its callers on its underlying vsock protocol.
+pub trait Save {
+    fn save(&self) -> &VsockType;
+}
+
 /// Any channel that handles vsock packet traffic: sending and receiving packets. Since we're
 /// implementing the device model here, our responsibility is to always process the sending of
 /// packets (i.e. the TX queue). So, any locally generated data, addressed to the driver (e.g.
@@ -187,4 +190,4 @@ pub trait VsockChannel {
 /// The vsock backend, which is basically an epoll-event-driven vsock channel.
 /// Currently, the only implementation we have is `crate::devices::virtio::unix::muxer::VsockMuxer`,
 /// which translates guest-side vsock connections to host-side Unix domain socket connections.
-pub trait VsockBackend: VsockChannel + VsockEpollListener + Send {}
+pub trait VsockBackend: VsockChannel + VsockEpollListener + Save + Send {}
