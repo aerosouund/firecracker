@@ -133,7 +133,9 @@ pub enum VsockError {
     /// Tried to push to full IovDeque.
     IovDequeOverflow,
     /// Message too big for the intermediate connection buffer. buffer length {0}, incoming size {1}
-    MessageTooLong(usize, usize),
+    MessageTooLong(u32, u32),
+    /// Encountered an error while processing a volatile memory read/write.
+    VolatileMemory(VolatileMemoryError)
 }
 
 impl From<IoVecError> for VsockError {
@@ -190,4 +192,4 @@ pub trait VsockChannel {
 /// The vsock backend, which is basically an epoll-event-driven vsock channel.
 /// Currently, the only implementation we have is `crate::devices::virtio::unix::muxer::VsockMuxer`,
 /// which translates guest-side vsock connections to host-side Unix domain socket connections.
-pub trait VsockBackend: VsockChannel + VsockEpollListener + Save + Send {}
+pub trait VsockBackend: VsockChannel + VsockEpollListener + Send {}
