@@ -6,7 +6,6 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::vmm_config::vsock::deserialize_conn_buffer_size;
 use serde::{Deserialize, Serialize};
 
 use super::*;
@@ -42,11 +41,7 @@ pub struct VsockBackendState {
     pub uds_path: String,
     /// The last used host-side port.
     pub local_port_last: u32,
-    #[serde(default)]
     pub vsock_type: VsockType,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(deserialize_with = "deserialize_conn_buffer_size")]
     pub conn_buffer_size: Option<usize>,
 }
 
@@ -124,9 +119,12 @@ where
                 FIRECRACKER_MAX_QUEUE_SIZE,
             )
             .map_err(VsockError::VirtioState)?;
-        let backend_type = constructor_args.backend.save().clone();
-        let mut vsock =
-            Self::with_queues(state.cid, constructor_args.backend, &backend_type, queues)?;
+        let mut vsock = Self::with_queues(
+            state.cid,
+            constructor_args.backend,
+            &VsockType::Stream,
+            queues,
+        )?;
 
         vsock.acked_features = state.virtio_state.acked_features;
         vsock.avail_features = state.virtio_state.avail_features;
