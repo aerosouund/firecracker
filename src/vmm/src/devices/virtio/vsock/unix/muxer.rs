@@ -50,9 +50,8 @@ use crate::devices::virtio::vsock::csm::VsockConnection;
 use crate::devices::virtio::vsock::defs::uapi::{VSOCK_TYPE_SEQPACKET, VSOCK_TYPE_STREAM};
 use crate::devices::virtio::vsock::metrics::METRICS;
 use crate::devices::virtio::vsock::packet::{VsockPacketRx, VsockPacketTx};
-use crate::devices::virtio::vsock::unix::Socket;
 use crate::devices::virtio::vsock::unix::seqpacket::{SeqpacketConn, SeqpacketListener};
-use crate::devices::virtio::vsock::unix::{ConnBackend, ReadResult};
+use crate::devices::virtio::vsock::unix::{ConnBackend, ReadResult, Socket};
 use crate::logger::{IncMetric, debug, error, info, warn};
 use crate::vmm_config::vsock::VsockType;
 
@@ -334,7 +333,7 @@ impl VsockEpollListener for VsockMuxer {
 
 impl Save for VsockMuxer {
     fn save(&self) -> &VsockType {
-        &self.vsock_type
+        return &self.vsock_type;
     }
 }
 
@@ -444,6 +443,8 @@ impl VsockMuxer {
             // "connect" command that we're expecting.
             Some(EpollListener::LocalStream(_)) => {
                 if let Some(EpollListener::LocalStream(mut stream)) = self.remove_listener(fd) {
+                    // SAFETY: Safe because the fd is valid and we own it (removed from
+                    // listener_map).
                     Self::read_local_stream_port(&mut stream, &self.vsock_type)
                         .map(|peer_port| (self.allocate_local_port(), peer_port))
                         .and_then(|(local_port, peer_port)| {
@@ -685,30 +686,55 @@ impl VsockMuxer {
     /// RST packet will be scheduled for delivery to the guest.
     fn handle_peer_request_pkt(&mut self, pkt: &VsockPacketTx) {
         let port_path = format!("{}_{}", self.host_sock_path, pkt.hdr.dst_port());
-        let backend = match ConnBackend::connect(&self.vsock_type, port_path) {
-            Ok(b) => b,
-            Err(_) => {
-                self.enq_rst(pkt.hdr.dst_port(), pkt.hdr.src_port());
-                return;
+        match self.vsock_type {
+            VsockType::Stream => {
+                UnixStream::connect(port_path)
+                    .and_then(|stream| stream.set_nonblocking(true).map(|_| stream))
+                    .map_err(VsockUnixBackendError::UnixConnect)
+                    .and_then(|stream| {
+                        self.add_connection(
+                            ConnMapKey {
+                                local_port: pkt.hdr.dst_port(),
+                                peer_port: pkt.hdr.src_port(),
+                            },
+                            VsockConnection::<ConnBackend>::new_peer_init(
+                                ConnBackend::Stream(stream),
+                                uapi::VSOCK_HOST_CID,
+                                self.cid,
+                                pkt.hdr.dst_port(),
+                                pkt.hdr.src_port(),
+                                pkt.hdr.buf_alloc(),
+                                VsockType::Stream,
+                                None,
+                            ),
+                        )
+                    })
+                    .unwrap_or_else(|_| self.enq_rst(pkt.hdr.dst_port(), pkt.hdr.src_port()));
             }
-        };
-
-        self.add_connection(
-            ConnMapKey {
-                local_port: pkt.hdr.dst_port(),
-                peer_port: pkt.hdr.src_port(),
-            },
-            VsockConnection::<ConnBackend>::new_peer_init(
-                backend,
-                uapi::VSOCK_HOST_CID,
-                self.cid,
-                pkt.hdr.dst_port(),
-                pkt.hdr.src_port(),
-                pkt.hdr.buf_alloc(),
-                self.vsock_type.clone(),
-                None,
-            ),
-        );
+            VsockType::Seqpacket => {
+                SeqpacketConn::connect(&port_path)
+                    .map_err(VsockUnixBackendError::UnixConnect)
+                    .and_then(|stream| {
+                        self.add_connection(
+                            ConnMapKey {
+                                local_port: pkt.hdr.dst_port(),
+                                peer_port: pkt.hdr.src_port(),
+                            },
+                            VsockConnection::<ConnBackend>::new_peer_init(
+                                ConnBackend::Seqpacket(stream),
+                                uapi::VSOCK_HOST_CID,
+                                self.cid,
+                                pkt.hdr.dst_port(),
+                                pkt.hdr.src_port(),
+                                pkt.hdr.buf_alloc(),
+                                VsockType::Seqpacket,
+                                self.conn_buffer_size,
+                            ),
+                        )
+                    })
+                    .unwrap_or_else(|_| self.enq_rst(pkt.hdr.dst_port(), pkt.hdr.src_port()));
+            }
+        }
     }
 
     /// Perform an action that might mutate a connection's state.
