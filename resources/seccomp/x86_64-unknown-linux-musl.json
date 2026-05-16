@@ -131,6 +131,19 @@
                 ]
             },
             {
+                "syscall": "accept4",
+                "comment": "Called to accept socket connections",
+                "args": [
+                    {
+                        "index": 3,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 526336,
+                        "comment": "libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK"
+                    }
+                ]
+            },
+            {
                 "syscall": "fcntl",
                 "comment": "Needed for VSOCK: set FD_CLOEXEC on socket",
                 "args": [
