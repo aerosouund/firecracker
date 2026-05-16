@@ -131,26 +131,12 @@ def boot_vsock_vm(
     return vm
 
 
-def start_guest_echo_server(vm):
+def start_guest_echo_server(vm, protocol=1):
     """Start a vsock echo server in the microVM.
 
     Returns a UDS path to connect to the server.
     """
-    cmd = f"nohup socat VSOCK-LISTEN:{ECHO_SERVER_PORT},backlog=128,reuseaddr,fork EXEC:'/bin/cat' > /dev/null 2>&1 &"
-    vm.ssh.check_output(cmd)
-
-    # Give the server time to initialise
-    time.sleep(1)
-
-    return os.path.join(vm.jailer.chroot_path(), VSOCK_UDS_PATH)
-
-
-def start_seqpacket_echo_server(vm):
-    """Start a vsock seqpacket echo server in the microVM.
-
-    Returns a UDS path to connect to the server.
-    """
-    cmd = f"nohup /tmp/vsock_seq_server serve {ECHO_SERVER_PORT} af_vsock >/dev/null 2>&1 &"
+    cmd = f"nohup socat VSOCK-LISTEN:{ECHO_SERVER_PORT},backlog=128,socktype={protocol},reuseaddr,fork EXEC:'/bin/cat' > /dev/null 2>&1 &"
     vm.ssh.check_output(cmd)
 
     # Give the server time to initialise
@@ -181,22 +167,16 @@ def check_host_connections(uds_path, blob_path, blob_hash, vsock_type=SOCK_STREA
         assert wrk.hash == blob_hash
 
 
-def check_guest_connections_seqpacket(
-    vm, server_port_path, server_bin_path, blob_path, blob_hash
-):
+def check_guest_connections_seqpacket(vm, server_port_path, blob_path, blob_hash):
     """Test guest-initiated connections.
 
     This will start an echo server on the host (in its own thread), then
     start `TEST_CONNECTION_COUNT` workers inside the guest VM, all
     communicating with the echo server.
     """
-    port = server_port_path.split("_")[-1]
-    if Path(server_port_path).exists():
-        Path(
-            server_port_path
-        ).unlink()  # the vsock server program doesn't have reuseaddr
-
-    echo_server = Popen([server_bin_path, "serve", port, "af_unix", server_port_path])
+    echo_server = Popen(
+        ["socat", f"UNIX-LISTEN:{server_port_path},socktype=5,fork,backlog=5", "exec:'/bin/cat'"]
+    )
 
     try:
         # Give the server program bit of time to create the socket
@@ -336,7 +316,7 @@ def _vsock_connect_to_guest(uds_path, port, vsock_type=SOCK_STREAM):
 
 
 def _copy_vsock_data_to_guest(
-    ssh_connection, blob_path, vm_blob_path, vsock_helper=None, vsock_seq_server=None
+    ssh_connection, blob_path, vm_blob_path, vsock_helper=None
 ):
     # Copy the data file and a vsock helper to the guest.
 
@@ -345,8 +325,6 @@ def _copy_vsock_data_to_guest(
     assert ecode == 0, "Failed to set up tmpfs drive on the guest."
     if vsock_helper:
         ssh_connection.scp_put(vsock_helper, "/tmp/vsock_helper")
-    if vsock_seq_server:
-        ssh_connection.scp_put(vsock_seq_server, "/tmp/vsock_seq_server")
 
     ssh_connection.scp_put(blob_path, vm_blob_path)
 

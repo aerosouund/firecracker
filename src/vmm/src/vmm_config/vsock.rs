@@ -35,7 +35,9 @@ pub enum VsockType {
     Seqpacket,
 }
 
-fn deserialize_conn_buffer_size<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+/// This function imposes limits on the conn_buffer_size during serialization for how
+/// big or small it can be and rejects invalid values by returning an error.
+pub fn deserialize_conn_buffer_size<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -161,7 +163,8 @@ impl VsockBuilder {
             cfg.conn_buffer_size,
         )?;
 
-        Vsock::new(u64::from(cfg.guest_cid), backend).map_err(VsockConfigError::CreateVsockDevice)
+        Vsock::new(u64::from(cfg.guest_cid), backend, &cfg.vsock_type)
+            .map_err(VsockConfigError::CreateVsockDevice)
     }
 
     /// Returns the structure used to configure the vsock device.
@@ -232,15 +235,17 @@ pub(crate) mod tests {
         let mut vsock_builder = VsockBuilder::new();
         let mut tmp_sock_file = TempFile::new().unwrap();
         tmp_sock_file.remove().unwrap();
+        let vsock_type = VsockType::default();
         let vsock = Vsock::new(
             0,
             VsockUnixBackend::new(
                 1,
                 tmp_sock_file.as_path().to_str().unwrap().to_string(),
-                VsockType::default(),
+                vsock_type.clone(),
                 None,
             )
             .unwrap(),
+            &vsock_type,
         )
         .unwrap();
 

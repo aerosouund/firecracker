@@ -10,31 +10,29 @@ use std::os::unix::net::UnixListener;
 use std::fmt::Debug;
 use vm_memory::{ReadVolatile, VolatileMemoryError, WriteVolatile};
 
-use crate::devices::virtio::vsock::unix::ConnBackend;
+use crate::devices::virtio::vsock::unix::{ConnBackend, Socket};
 
 #[derive(Debug)]
 pub struct SeqpacketConn(std::os::fd::OwnedFd);
 
 impl SeqpacketConn {
-    pub fn connect(path: &str) -> Result<Self, io::Error> {
-        let (addr, addr_len) = build_addr(path)?;
+    pub fn connect(path: String) -> Result<Self, io::Error> {
+        let (addr, addr_len) = build_addr(&path.to_string())?;
 
         // SAFETY: Valid flags and socket type.
-        let fd =
-            unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
         if fd == -1 {
             return Err(io::Error::last_os_error());
         }
 
-        // Set non-blocking via FIONBIO ioctl (already allowed by seccomp filter)
-        let mut nonblocking: libc::c_int = 1;
-        // SAFETY: `fd` is valid (checked above); `nonblocking` is a valid int pointer.
-        let ret = unsafe { libc::ioctl(fd, libc::FIONBIO, &mut nonblocking) };
-        if ret < 0 {
-            // SAFETY: `fd` is a valid open fd; closing it to avoid a leak.
-            unsafe { libc::close(fd) };
-            return Err(io::Error::last_os_error());
-        }
+        // SAFETY: We just checked that the file descriptor is valid.
+        let ownedfd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         // SAFETY: Valid file descriptor and errors checked.
         unsafe {
@@ -44,14 +42,11 @@ impl SeqpacketConn {
                 addr_len,
             ) == -1
             {
-                let err = io::Error::last_os_error();
-                libc::close(fd);
-                return Err(err);
+                return Err(io::Error::last_os_error());
             }
         };
 
-        // SAFETY: Valid file descriptor and errors checked.
-        Ok(unsafe { SeqpacketConn(OwnedFd::from_raw_fd(fd)) })
+        Ok(SeqpacketConn(ownedfd))
     }
 }
 
@@ -66,8 +61,7 @@ impl Read for SeqpacketConn {
         let ptr = buf.as_mut_ptr().cast::<libc::c_void>();
         // SAFETY: The file descriptor is valid and open. The buffer pointer is valid for writing
         // `buf.len()` bytes.
-        let received =
-            unsafe { libc::recv(self.0.as_raw_fd(), ptr, buf.len(), libc::MSG_NOSIGNAL) };
+        let received = unsafe { libc::recv(self.0.as_raw_fd(), ptr, buf.len(), libc::MSG_TRUNC) };
         if received < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -108,7 +102,7 @@ impl ReadVolatile for SeqpacketConn {
         // SAFETY: Rust's I/O safety invariants ensure that BorrowedFd contains a valid file
         // descriptor`. The memory pointed to by `dst` is valid for writes of length
         // `buf.len() by the invariants upheld by the constructor of `VolatileSlice`.
-        let bytes_read = unsafe { libc::recv(fd, dst, buf.len(), 0) };
+        let bytes_read = unsafe { libc::recv(fd, dst, buf.len(), libc::MSG_TRUNC) };
 
         if bytes_read < 0 {
             // We don't know if a partial read might have happened, so mark everything as dirty
@@ -176,8 +170,7 @@ impl SeqpacketListener {
                 addr_len,
             ) == -1
             {
-                let err = io::Error::last_os_error();
-                return Err(err);
+                return Err(io::Error::last_os_error());
             }
         };
 
@@ -199,13 +192,9 @@ impl AsRawFd for SeqpacketListener {
     }
 }
 
-pub trait Socket: AsRawFd + Debug + Send {
-    fn accept(&self) -> Result<ConnBackend, io::Error>;
-}
-
 impl Socket for SeqpacketListener {
     fn accept(&self) -> Result<ConnBackend, io::Error> {
-        let flags = libc::SOCK_CLOEXEC;
+        let flags = libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
         let mut addr: libc::sockaddr_un = uninitialized_address();
         let mut addr_len: libc::socklen_t = std::mem::size_of_val(&addr) as libc::socklen_t;
 
@@ -222,23 +211,18 @@ impl Socket for SeqpacketListener {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: We just checked if its a valid fd.
+        let ownedfd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         // Set non-blocking via FIONBIO ioctl (already allowed by seccomp filter)
         let mut nonblocking: libc::c_int = 1;
         // SAFETY: `fd` is valid (checked above); `nonblocking` is a valid int pointer.
         let ret = unsafe { libc::ioctl(fd, libc::FIONBIO, &mut nonblocking) };
         if ret < 0 {
-            // SAFETY: `fd` is a valid open fd; closing it to avoid a leak.
-            unsafe { libc::close(fd) };
             return Err(io::Error::last_os_error());
         }
 
-        // SAFETY: Transferring unique ownership of valid fd to OwnedFd
-        unsafe {
-            Ok(ConnBackend::Seqpacket(SeqpacketConn(OwnedFd::from_raw_fd(
-                fd,
-            ))))
-        }
+        Ok(ConnBackend::Seqpacket(SeqpacketConn(ownedfd)))
     }
 }
 
@@ -254,7 +238,7 @@ fn build_addr(path: &str) -> Result<(libc::sockaddr_un, u32), io::Error> {
     let mut addr: libc::sockaddr_un = uninitialized_address();
     addr.sun_family = libc::AF_UNIX as _;
     let max_addr = std::mem::size_of_val(&addr.sun_path);
-    if path.len() > std::mem::size_of_val(&addr.sun_path) {
+    if path.len() >= std::mem::size_of_val(&addr.sun_path) {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             format!(
@@ -270,7 +254,7 @@ fn build_addr(path: &str) -> Result<(libc::sockaddr_un, u32), io::Error> {
         std::ptr::copy_nonoverlapping(
             path.as_ptr().cast::<libc::c_char>(),
             addr.sun_path.as_mut_ptr(),
-            path.len().min(addr.sun_path.len()),
+            path.len(),
         );
     };
     Ok((addr, std::mem::size_of::<libc::sockaddr_un>() as u32))

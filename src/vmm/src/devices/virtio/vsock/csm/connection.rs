@@ -77,7 +77,7 @@ use std::fmt::Debug;
 //          2. The receiver can be proactive, and send VSOCK_OP_CREDIT_UPDATE packet, whenever
 //             it thinks its peer's information is out of date.
 //          Our implementation uses the proactive approach.
-use std::io::{Cursor, Error, ErrorKind, Write};
+use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::num::Wrapping;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
@@ -92,7 +92,9 @@ use super::txbuf::TxBuf;
 use super::{ConnState, PendingRx, PendingRxSet, VsockCsmError, defs};
 use crate::devices::virtio::vsock::VsockUnixBackendError;
 use crate::devices::virtio::vsock::metrics::METRICS;
-use crate::devices::virtio::vsock::packet::{VsockPacketHeader, VsockPacketRx, VsockPacketTx};
+use crate::devices::virtio::vsock::packet::{
+    VIRTIO_VSOCK_SEQ_EOM, VIRTIO_VSOCK_SEQ_EOR, VsockPacketHeader, VsockPacketRx, VsockPacketTx,
+};
 use crate::devices::virtio::vsock::unix::{IncomingLength, ReadResult};
 use crate::logger::{IncMetric, debug, error, info, warn};
 use crate::utils::wrap_usize_to_u32;
@@ -103,7 +105,7 @@ use crate::vmm_config::vsock::VsockType;
 /// Used as an alias for `ReadVolatile + Write + WriteVolatile + AsRawFd`
 /// (sadly, trait aliases are not supported,
 /// <https://github.com/rust-lang/rfcs/pull/1733#issuecomment-243840014>).
-pub trait VsockConnectionBackend: ReadVolatile + Write + WriteVolatile + AsRawFd {}
+pub trait VsockConnectionBackend: Read + ReadVolatile + Write + WriteVolatile + AsRawFd {}
 
 const DEFAULT_CONN_BUFFER_SIZE: usize = (64 * 1024);
 
@@ -164,67 +166,53 @@ impl<S: VsockConnectionBackend + Debug> VsockConnection<S> {
             }
             VsockType::Seqpacket => {
                 if self.connection_buffer.is_none() {
+                    // check how many bytes are in this incoming message
                     let incoming_msg_size = self.stream.incoming_len().map_err(|e| {
                         VsockError::VsockUdsBackend(VsockUnixBackendError::UnixRead(e))
                     })?;
-
-                    if incoming_msg_size > pkt.buf_size() as usize {
-                        self.handle_new_packet_large(
-                            pkt,
-                            max_len,
-                            u32::try_from(incoming_msg_size).unwrap_or(u32::MAX),
-                        )
-                    } else {
-                        self.handle_new_packet_small(pkt, max_len)
+                    // if its bigger than what we can receive, return an error
+                    if incoming_msg_size > self.conn_buf_size {
+                        return Err(VsockError::MessageTooLong(
+                            self.conn_buf_size,
+                            incoming_msg_size,
+                        ));
                     }
-                } else {
-                    self.handle_connection_buffer_has_data(pkt, max_len)
+                    return self.handle_new_packet(pkt, max_len, incoming_msg_size as u32);
                 }
+
+                self.handle_connection_buffer_has_data(pkt, max_len)
             }
         }
     }
 
-    fn handle_new_packet_large(
+    fn handle_new_packet(
         &mut self,
         pkt: &mut VsockPacketRx,
         max_len: u32,
         incoming_msg_len: u32,
     ) -> Result<ReadResult, VsockError> {
-        if incoming_msg_len as usize > self.conn_buf_size {
-            return Err(VsockError::MessageTooLong(
-                u32::try_from(self.conn_buf_size).unwrap_or(u32::MAX),
-                incoming_msg_len,
-            ));
+        // the incoming message is small enough to fit in the current packet's buffer
+        if incoming_msg_len <= pkt.buf_size() {
+            let b = pkt.read_at_offset_from(&mut self.stream, 0, max_len)?;
+            // packet is small enough to fit into a single descriptor, set EOM/EOR directly.
+            pkt.hdr
+                .set_flag(VIRTIO_VSOCK_SEQ_EOM)
+                .set_flag(VIRTIO_VSOCK_SEQ_EOR);
+            return Ok(ReadResult::new(b, false));
         }
 
+        // Message is big for a single packet's buffer. Create an intermediary vector
+        // and receive into it.
         let mut backing_vector = vec![0u8; incoming_msg_len as usize];
-        {
-            // SAFETY: `backing_vector` is a valid Vec<u8> and we hold a mutable reference to it,
-            // guaranteeing exclusive access for the duration of this call.
-            let mut vol_slice = unsafe {
-                VolatileSlice::new(backing_vector.as_mut_ptr(), incoming_msg_len as usize)
-            };
-            self.stream
-                .read_volatile(&mut vol_slice)
-                .map_err(VsockError::VolatileMemory)?;
-        }
+        self.stream
+            .read(&mut backing_vector)
+            .map_err(|e| VsockError::VsockUdsBackend(VsockUnixBackendError::UnixRead(e)))?;
 
         let mut cursor = Cursor::new(backing_vector);
         let b = pkt.read_at_offset_from(&mut cursor, 0, max_len)?;
         self.connection_buffer = Some(cursor);
 
         Ok(ReadResult::new(b, true))
-    }
-
-    fn handle_new_packet_small(
-        &mut self,
-        pkt: &mut VsockPacketRx,
-        max_len: u32,
-    ) -> Result<ReadResult, VsockError> {
-        let b = pkt.read_at_offset_from(&mut self.stream, 0, max_len)?;
-        // packet is small enough to fit into a single descriptor, set EOM/EOR directly.
-        pkt.hdr.set_msg_eom().set_msg_eor();
-        Ok(ReadResult::new(b, false))
     }
 
     fn handle_connection_buffer_has_data(
@@ -247,7 +235,9 @@ impl<S: VsockConnectionBackend + Debug> VsockConnection<S> {
         let done = conn_buf.position() >= conn_buf.get_ref().len() as u64;
         if done {
             self.connection_buffer = None;
-            pkt.hdr.set_msg_eom().set_msg_eor();
+            pkt.hdr
+                .set_flag(VIRTIO_VSOCK_SEQ_EOM)
+                .set_flag(VIRTIO_VSOCK_SEQ_EOR);
             Ok(ReadResult::new(b, false))
         } else {
             Ok(ReadResult::new(b, true))
@@ -822,7 +812,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Error as IoError, ErrorKind, Write};
+    use std::io::{Error as IoError, ErrorKind, Read, Write};
     use std::os::unix::io::RawFd;
     use std::time::{Duration, Instant};
 
@@ -909,6 +899,25 @@ mod tests {
                     IoError::new(ErrorKind::WouldBlock, "EAGAIN"),
                 )),
             }
+        }
+    }
+
+    impl Read for TestStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            // SAFETY: `buf` is a valid writable buffer for the duration of
+            // the call.
+            let ret = unsafe {
+                libc::recv(
+                    self.fd.as_raw_fd(),
+                    buf.as_mut_ptr().cast::<libc::c_void>(),
+                    buf.len(),
+                    0,
+                )
+            };
+            if ret < 0 {
+                return Err(IoError::last_os_error());
+            }
+            Ok(ret as usize)
         }
     }
 
@@ -1514,6 +1523,25 @@ mod tests {
             let n = ret.cast_unsigned();
             buf.copy_from(&tmp[..n]);
             Ok(n)
+        }
+    }
+
+    impl Read for SeqpacketTestStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            // SAFETY: `buf` is a valid writable buffer for the duration of
+            // the call.
+            let ret = unsafe {
+                libc::recv(
+                    self.local_fd,
+                    buf.as_mut_ptr().cast::<libc::c_void>(),
+                    buf.len(),
+                    0,
+                )
+            };
+            if ret < 0 {
+                return Err(IoError::last_os_error());
+            }
+            Ok(ret as usize)
         }
     }
 

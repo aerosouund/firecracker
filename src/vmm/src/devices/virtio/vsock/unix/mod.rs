@@ -11,6 +11,7 @@ mod muxer;
 mod muxer_killq;
 mod muxer_rxq;
 mod seqpacket;
+use std::fmt::Debug;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -20,6 +21,7 @@ use vm_memory::io::{ReadVolatile, WriteVolatile};
 
 use crate::devices::virtio::vsock::csm::VsockConnectionBackend;
 use crate::devices::virtio::vsock::unix::seqpacket::SeqpacketConn;
+use crate::vmm_config::vsock::VsockType;
 
 mod defs {
     /// Maximum number of established connections that we can handle.
@@ -59,24 +61,39 @@ pub enum ConnBackend {
     Seqpacket(SeqpacketConn),
 }
 
-macro_rules! forward_to_inner {
-    ($self:ident, $method:ident $(, $args:expr )* ) => {
-        match $self {
-            ConnBackend::Stream(inner) => inner.$method($($args),*),
-            ConnBackend::Seqpacket(inner) => inner.$method($($args),*),
+impl ConnBackend {
+    fn connect(conn_type: &VsockType, port_path: String) -> Result<Self, VsockUnixBackendError> {
+        match conn_type {
+            VsockType::Seqpacket => {
+                let conn = SeqpacketConn::connect(port_path)
+                    .map_err(VsockUnixBackendError::UnixConnect)?;
+                Ok(ConnBackend::Seqpacket(conn))
+            }
+            VsockType::Stream => {
+                let conn = UnixStream::connect(port_path)
+                    .and_then(|stream| stream.set_nonblocking(true).map(|_| stream))
+                    .map_err(VsockUnixBackendError::UnixConnect)?;
+                Ok(ConnBackend::Stream(conn))
+            }
         }
-    };
+    }
 }
 
 impl Read for ConnBackend {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        forward_to_inner!(self, read, buf)
+        match self {
+            ConnBackend::Stream(inner) => inner.read(buf),
+            ConnBackend::Seqpacket(inner) => inner.read(buf),
+        }
     }
 }
 
 impl AsRawFd for ConnBackend {
     fn as_raw_fd(&self) -> i32 {
-        forward_to_inner!(self, as_raw_fd)
+        match self {
+            ConnBackend::Stream(inner) => inner.as_raw_fd(),
+            ConnBackend::Seqpacket(inner) => inner.as_raw_fd(),
+        }
     }
 }
 
@@ -85,7 +102,10 @@ impl ReadVolatile for ConnBackend {
         &mut self,
         buf: &mut vm_memory::VolatileSlice<B>,
     ) -> Result<usize, vm_memory::VolatileMemoryError> {
-        forward_to_inner!(self, read_volatile, buf)
+        match self {
+            ConnBackend::Stream(inner) => inner.read_volatile(buf),
+            ConnBackend::Seqpacket(inner) => inner.read_volatile(buf),
+        }
     }
 }
 
@@ -94,13 +114,19 @@ impl WriteVolatile for ConnBackend {
         &mut self,
         buf: &vm_memory::VolatileSlice<B>,
     ) -> Result<usize, vm_memory::VolatileMemoryError> {
-        forward_to_inner!(self, write_volatile, buf)
+        match self {
+            ConnBackend::Stream(inner) => inner.write_volatile(buf),
+            ConnBackend::Seqpacket(inner) => inner.write_volatile(buf),
+        }
     }
 }
 
 impl Write for ConnBackend {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        forward_to_inner!(self, write, buf)
+        match self {
+            ConnBackend::Stream(inner) => inner.write(buf),
+            ConnBackend::Seqpacket(inner) => inner.write(buf),
+        }
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
@@ -114,7 +140,8 @@ pub trait IncomingLength {
 impl<B: VsockConnectionBackend> IncomingLength for B {
     fn incoming_len(&mut self) -> Result<usize, io::Error> {
         let fd = self.as_raw_fd();
-        // the maximum message size 256 bytes anyways
+        // Create a throwaway buffer just for us to satisfy the signature of recv.The number
+        // we care about is the result of the syscall.
         let mut peek_buf = [0u8; 1];
         // SAFETY: `fd` is a valid file descriptor for the duration of this call, and `peek_buf`
         // is a valid single-byte buffer. MSG_PEEK | MSG_TRUNC returns the message size without
@@ -148,6 +175,10 @@ impl ReadResult {
             should_retrigger,
         }
     }
+}
+
+pub trait Socket: AsRawFd + Debug + Send {
+    fn accept(&self) -> Result<ConnBackend, io::Error>;
 }
 
 impl VsockConnectionBackend for ConnBackend {}
