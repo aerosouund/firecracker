@@ -139,7 +139,8 @@ def start_guest_echo_server(vm, protocol=1):
     Returns a UDS path to connect to the server.
     """
 
-    cmd = f"nohup /tmp/vsock_seq_server serve {ECHO_SERVER_PORT} af_vsock >/dev/null 2>&1 &"
+
+    cmd = f"nohup socat VSOCK-LISTEN:{ECHO_SERVER_PORT},socktype=5,backlog=128,reuseaddr,fork EXEC:'/bin/cat' > /dev/null 2>&1 &"
     vm.ssh.check_output(cmd)
 
     # Give the server time to initialise
