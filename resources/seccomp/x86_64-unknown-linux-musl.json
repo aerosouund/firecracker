@@ -131,6 +131,39 @@
                 ]
             },
             {
+                "syscall": "accept4",
+                "comment": "Called to accept socket connections",
+                "args": [
+                    {
+                        "index": 3,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 526336,
+                        "comment": "libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK"
+                    }
+                ]
+            },
+            {
+                "syscall": "fcntl",
+                "comment": "Needed for VSOCK: set FD_CLOEXEC on socket",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 2,
+                        "comment": "F_SETFD"
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1,
+                        "comment": "FD_CLOEXEC"
+                    }
+                ]
+            },
+            {
                 "syscall": "fcntl",
                 "comment": "Used by snapshotting, drive patching and rescanning",
                 "args": [
@@ -298,7 +331,9 @@
                     {
                         "index": 2,
                         "type": "dword",
-                        "op": {"masked_eq": 4},
+                        "op": {
+                            "masked_eq": 4
+                        },
                         "val": 0,
                         "comment": "Ensure PROT_EXEC is not set"
                     }
@@ -318,7 +353,9 @@
                     {
                         "index": 2,
                         "type": "dword",
-                        "op": {"masked_eq": 4},
+                        "op": {
+                            "masked_eq": 4
+                        },
                         "val": 0,
                         "comment": "Ensure PROT_EXEC is not set"
                     }
@@ -338,7 +375,9 @@
                     {
                         "index": 2,
                         "type": "dword",
-                        "op": {"masked_eq": 4},
+                        "op": {
+                            "masked_eq": 4
+                        },
                         "val": 0,
                         "comment": "Ensure PROT_EXEC is not set"
                     }
@@ -400,6 +439,53 @@
                         "op": "eq",
                         "val": 6,
                         "comment": "SIGABRT"
+                    }
+                ]
+            },
+            {
+                "syscall": "setsockopt",
+                "comment": "Needed for VSOCK: set SO_REUSEADDR",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1,
+                        "comment": "SOL_SOCKET"
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 2,
+                        "comment": "SO_REUSEADDR"
+                    }
+                ]
+            },
+            {
+                "syscall": "socket",
+                "comment": "Needed for VSOCK: create AF_VSOCK SOCK_SEQPACKET socket",
+                "args": [
+                    {
+                        "index": 0,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 40,
+                        "comment": "AF_VSOCK"
+                    },
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 5,
+                        "comment": "SOCK_SEQPACKET"
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 0,
+                        "comment": "protocol 0"
                     }
                 ]
             },
@@ -527,6 +613,18 @@
                         "op": "eq",
                         "val": 21537,
                         "comment": "FIONBIO"
+                    }
+                ]
+            },
+            {
+                "syscall": "ioctl",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1977,
+                        "comment": "IOCTL_VM_SOCKETS_GET_LOCAL_CID = _IO(7, 0xb9)"
                     }
                 ]
             },
@@ -772,8 +870,8 @@
                 "comment": "sigaltstack is used by Rust stdlib to remove alternative signal stack during thread teardown."
             },
             {
-              "syscall": "getrandom",
-              "comment": "getrandom is used by `HttpServer` to reinialize `HashMap` after moving to the API thread"
+                "syscall": "getrandom",
+                "comment": "getrandom is used by `HttpServer` to reinialize `HashMap` after moving to the API thread"
             },
             {
                 "syscall": "accept4",

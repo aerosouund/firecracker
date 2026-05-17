@@ -114,8 +114,8 @@
                 "comment": "sigaltstack is used by Rust stdlib to remove alternative signal stack during thread teardown."
             },
             {
-              "syscall": "getrandom",
-              "comment": "getrandom is used by aws-lc library which we consume in virtio-rng"
+                "syscall": "getrandom",
+                "comment": "getrandom is used by aws-lc library which we consume in virtio-rng"
             },
             {
                 "syscall": "accept4",
@@ -127,6 +127,26 @@
                         "op": "eq",
                         "val": 524288,
                         "comment": "libc::SOCK_CLOEXEC"
+                    }
+                ]
+            },
+            {
+                "syscall": "fcntl",
+                "comment": "Needed for VSOCK: set FD_CLOEXEC on socket",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 2,
+                        "comment": "F_SETFD"
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1,
+                        "comment": "FD_CLOEXEC"
                     }
                 ]
             },
@@ -217,7 +237,7 @@
             },
             {
                 "syscall": "madvise",
-                "comment": "Used by the VirtIO balloon device and by musl for some customer workloads. It is also used by aws-lc during random number generation. They setup a memory page that mark with MADV_WIPEONFORK to be able to detect forks. They also call it with -1 to see if madvise is supported in certain platforms." 
+                "comment": "Used by the VirtIO balloon device and by musl for some customer workloads. It is also used by aws-lc during random number generation. They setup a memory page that mark with MADV_WIPEONFORK to be able to detect forks. They also call it with -1 to see if madvise is supported in certain platforms."
             },
             {
                 "syscall": "msync",
@@ -298,7 +318,9 @@
                     {
                         "index": 2,
                         "type": "dword",
-                        "op": {"masked_eq": 4},
+                        "op": {
+                            "masked_eq": 4
+                        },
                         "val": 0,
                         "comment": "Ensure PROT_EXEC is not set"
                     }
@@ -318,7 +340,9 @@
                     {
                         "index": 2,
                         "type": "dword",
-                        "op": {"masked_eq": 4},
+                        "op": {
+                            "masked_eq": 4
+                        },
                         "val": 0,
                         "comment": "Ensure PROT_EXEC is not set"
                     }
@@ -338,7 +362,9 @@
                     {
                         "index": 2,
                         "type": "dword",
-                        "op": {"masked_eq": 4},
+                        "op": {
+                            "masked_eq": 4
+                        },
                         "val": 0,
                         "comment": "Ensure PROT_EXEC is not set"
                     }
@@ -404,6 +430,53 @@
                 ]
             },
             {
+                "syscall": "setsockopt",
+                "comment": "Needed for VSOCK: set SO_REUSEADDR",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1,
+                        "comment": "SOL_SOCKET"
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 2,
+                        "comment": "SO_REUSEADDR"
+                    }
+                ]
+            },
+            {
+                "syscall": "socket",
+                "comment": "Needed for VSOCK: create AF_VSOCK SOCK_SEQPACKET socket",
+                "args": [
+                    {
+                        "index": 0,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 40,
+                        "comment": "AF_VSOCK"
+                    },
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 5,
+                        "comment": "SOCK_SEQPACKET"
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 0,
+                        "comment": "protocol 0"
+                    }
+                ]
+            },
+            {
                 "syscall": "socket",
                 "comment": "Called to open the vsock UDS",
                 "args": [
@@ -444,8 +517,8 @@
                         "index": 1,
                         "type": "dword",
                         "op": "eq",
-                        "val": 524293,
-                        "comment": "libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC"
+                        "val": 526341,
+                        "comment": "libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK"
                     },
                     {
                         "index": 2,
@@ -514,6 +587,18 @@
                         "type": "dword",
                         "op": "eq",
                         "val": 0
+                    }
+                ]
+            },
+            {
+                "syscall": "ioctl",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1977,
+                        "comment": "IOCTL_VM_SOCKETS_GET_LOCAL_CID = _IO(7, 0xb9)"
                     }
                 ]
             },
@@ -760,8 +845,8 @@
                 "comment": "sigaltstack is used by Rust stdlib to remove alternative signal stack during thread teardown."
             },
             {
-              "syscall": "getrandom",
-              "comment": "getrandom is used by `HttpServer` to reinialize `HashMap` after moving to the API thread"
+                "syscall": "getrandom",
+                "comment": "getrandom is used by `HttpServer` to reinialize `HashMap` after moving to the API thread"
             },
             {
                 "syscall": "accept4",
@@ -773,6 +858,18 @@
                         "op": "eq",
                         "val": 524288,
                         "comment": "libc::SOCK_CLOEXEC"
+                    }
+                ]
+            },
+            {
+                "syscall": "ioctl",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1977,
+                        "comment": "IOCTL_VM_SOCKETS_GET_LOCAL_CID = _IO(7, 0xb9)"
                     }
                 ]
             },

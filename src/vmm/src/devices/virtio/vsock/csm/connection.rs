@@ -223,6 +223,7 @@ impl<S: VsockConnectionBackend + Debug> VsockConnection<S> {
     ) -> Result<ReadResult, VsockError> {
         let b = pkt.read_at_offset_from(&mut self.stream, 0, max_len)?;
         // packet is small enough to fit into a single descriptor, set EOM/EOR directly.
+
         pkt.hdr.set_msg_eom().set_msg_eor();
         Ok(ReadResult::new(b, false))
     }
