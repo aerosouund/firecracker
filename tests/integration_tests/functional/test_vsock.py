@@ -38,7 +38,6 @@ from framework.utils_vsock import (
     make_blob,
     make_host_port_path,
     start_guest_echo_server,
-    start_seqpacket_echo_server,
 )
 from host_tools.fcmetrics import validate_fc_metrics
 
@@ -323,7 +322,7 @@ def test_vsock_seqpacket_h2g(
         vm_blob_path,
         vsock_seq_server=bin_vsock_seqpacket_listener_path,
     )
-    path = start_seqpacket_echo_server(vm)
+    path = start_guest_echo_server(vm)
 
     check_host_connections(path, blob_path, blob_hash, SOCK_SEQPACKET)
     metrics = vm.flush_metrics()
@@ -391,7 +390,7 @@ def test_vsock_seqpacket_h2g_overflow(
         vm_blob_path,
         vsock_seq_server=bin_vsock_seqpacket_listener_path,
     )
-    path = start_seqpacket_echo_server(vm)
+    path = start_guest_echo_server(vm)
 
     worker_error = None
 
